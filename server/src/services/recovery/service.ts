@@ -1870,6 +1870,7 @@ export function recoveryService(
             eq(issueComments.companyId, companyId),
             eq(issueComments.issueId, issueId),
             eq(issueComments.authorAgentId, assigneeAgentId),
+            eq(issueComments.origin, "comment"),
             gt(issueComments.createdAt, since),
           ),
         )

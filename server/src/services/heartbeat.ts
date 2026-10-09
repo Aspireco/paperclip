@@ -10,6 +10,7 @@ import {
   formatIssueIdentifierLink,
   parseNativeSessionGoalControl,
 } from "./heartbeat/scheduling.js";
+import { FAST_RESPONSE_AGENT_GUIDANCE, fastResponseHistoryBody } from "@paperclipai/shared";
 import { agentExecutionsHaveStopped } from "./agent-execution-stop.js";
 import {
   cancelHeartbeatNativeRun,
@@ -3032,7 +3033,7 @@ export function heartbeatService(
             ? [
                 {
                   id: comment.id,
-                  body: comment.body,
+                  body: fastResponseHistoryBody({ body: comment.body, origin: typeof comment.origin === "string" ? comment.origin : null }),
                   attachments: Array.isArray(comment.attachments)
                     ? comment.attachments.flatMap((attachment) => {
                         const descriptor = parseObject(attachment);
@@ -3191,6 +3192,7 @@ export function heartbeatService(
       } else {
         delete context.paperclipTaskMarkdownAssignmentCompact;
       }
+      context.paperclipTaskCommunicationGuidance = [context.paperclipTaskCommunicationGuidance, FAST_RESPONSE_AGENT_GUIDANCE].filter(Boolean).join("\n\n");
       if (issueRef) {
         const redactedWakeContext = await createRunSecretRedactionRegistry(
           db,

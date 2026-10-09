@@ -1,3 +1,7 @@
+import { eq } from "drizzle-orm";
+import { chatEndpoints } from "@paperclipai/db";
+import { fastResponseRoutes } from "./routes/fast-responses.js";
+import { fastResponseService } from "./services/fast-responses.js";
 import { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import { createLifecycleDriver } from "./services/agent-lifecycle-driver.js";
@@ -653,6 +657,19 @@ export async function createApp(
     publicBaseUrl: opts.chatWebhookPublicBaseUrl ?? opts.authPublicBaseUrl,
   });
   app.use(emailWebhookRoutes(emailChannels));
+  app.locals.fastResponses = fastResponseService(db, {
+    authorizeExternal: async (tx, request) => {
+      const [endpoint] = await tx.select({ provider: chatEndpoints.provider }).from(chatEndpoints).where(eq(chatEndpoints.id, request.endpointId!));
+      return endpoint?.provider === "agentmail" ? emailChannels.authorizeFastResponse(tx, request) : chatChannels.authorizeFastResponse(tx, request);
+    },
+    publishExternal: async (tx, request, commentId, text) => {
+      const [endpoint] = await tx.select({ provider: chatEndpoints.provider }).from(chatEndpoints).where(eq(chatEndpoints.id, request.endpointId!));
+      if (endpoint?.provider !== "agentmail") return false;
+      await emailChannels.publishFastResponse(tx, request, commentId, text);
+      return true;
+    },
+    budgetHooks: { cancelWorkForScope: connectionIntentHeartbeat.cancelBudgetScopeWork },
+  });
   app.use(chatWebhookRoutes(chatChannels));
   // The instance validates single-use registration state and its trusted
   // current origin. These exact callback routes are the public setup returns.
@@ -908,6 +925,7 @@ export async function createApp(
   app.locals.toolActionDeliveries = toolActionDeliveries;
   app.use(mcpGatewayProtocolRoutes(toolGateway));
   api.use(decisionModelRoutes(db));
+  api.use(fastResponseRoutes(db));
   api.use(aiConnectionRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure, trustedLocalStdioRuntimeHost }));
   api.use(
     toolAccessRoutes(db, {
@@ -1226,7 +1244,7 @@ export async function createApp(
   }
   emailChannels.start();
   const flushChatPublications = async () => {
-    await chatChannels.schedulePendingPublications();
+    await Promise.all([chatChannels.schedulePendingPublications(), emailChannels.flushPublications()]);
   };
   const chatReconciliation = createChatReconciliationCoordinator({
     reconcileProviderRuntimes: () => chatChannels.reconcileProviderRuntimes(),
