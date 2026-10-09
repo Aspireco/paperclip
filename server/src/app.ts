@@ -1244,7 +1244,7 @@ export async function createApp(
   }
   emailChannels.start();
   const flushChatPublications = async () => {
-    await Promise.all([chatChannels.schedulePendingPublications(), emailChannels.flushPublications()]);
+    await chatChannels.schedulePendingPublications();
   };
   const chatReconciliation = createChatReconciliationCoordinator({
     reconcileProviderRuntimes: () => chatChannels.reconcileProviderRuntimes(),

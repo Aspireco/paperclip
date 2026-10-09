@@ -96,8 +96,7 @@ describe("createChatReconciliationCoordinator", () => {
       source.indexOf("const flushChatPublications ="),
       source.indexOf("const flushChatPublications =") + 600,
     );
-    expect(flush).toContain("chatChannels.schedulePendingPublications()");
-    expect(flush).toContain("emailChannels.flushPublications()");
+    expect(flush).toContain("await chatChannels.schedulePendingPublications()");
     expect(flush).not.toContain("chatChannels.processPendingPublications()");
     expect(
       flush.slice(0, flush.indexOf("const chatReconciliation")),
