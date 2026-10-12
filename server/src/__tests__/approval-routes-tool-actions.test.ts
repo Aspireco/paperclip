@@ -46,6 +46,7 @@ const routeModules = hoistModuleGraph(registerModuleMocks, async () => {
 // Answers db.select().from(table).where(...).limit(n) with the held action request, and the
 // approve route's other reads (heartbeat runs) with nothing.
 function dbWithHeldAction(held: Record<string, unknown> | null) {
+  if (held) held = { approvalId: "approval-1", companyId: "company-1", ...held };
   const chain = (rows: unknown[]) => {
     const result = Promise.resolve(rows);
     return Object.assign(result, { limit: () => Promise.resolve(rows) });
@@ -144,6 +145,38 @@ describe("Aspireco: tool action approvals are one click", () => {
       .post("/api/approvals/approval-1/approve").send({});
 
     expect(res.status).toBe(200);
+  });
+
+  it("an approval that only names someone else's held action releases nothing (no laundering)", async () => {
+    // An agent can create an approval with any payload; only the gateway pairs an action to its approval.
+    mockApprovalService.approve.mockResolvedValue({ approval: toolApproval("approved"), applied: true });
+
+    const res = await request(await createApp({ id: "action-1", status: "pending", approvalId: "the-real-approval", expiresAt: null }))
+      .post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(toolActions.approve).not.toHaveBeenCalled();
+    expect(mockApprovalService.cancel).not.toHaveBeenCalled();
+  });
+
+  it("a forged reference to another company's action releases nothing", async () => {
+    mockApprovalService.approve.mockResolvedValue({ approval: toolApproval("approved"), applied: true });
+
+    const res = await request(await createApp({ id: "action-1", status: "pending", companyId: "company-2", expiresAt: null }))
+      .post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(toolActions.approve).not.toHaveBeenCalled();
+  });
+
+  it("rejecting an approval that only names someone else's held action declines nothing", async () => {
+    mockApprovalService.reject.mockResolvedValue({ approval: toolApproval("rejected"), applied: true });
+
+    const res = await request(await createApp({ id: "action-1", status: "pending", approvalId: "the-real-approval" }))
+      .post("/api/approvals/approval-1/reject").send({});
+
+    expect(res.status).toBe(200);
+    expect(toolActions.decline).not.toHaveBeenCalled();
   });
 
   it("ordinary approvals are untouched", async () => {

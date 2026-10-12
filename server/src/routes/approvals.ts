@@ -1,5 +1,5 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { heartbeatRuns, toolActionRequests, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
@@ -74,6 +74,24 @@ export function approvalRoutes(
   const issuesSvc = issueService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  // Aspireco: the held tool action this approval was minted for, or null. The payload names an
+  // action, but only the gateway sets toolActionRequests.approvalId, so an approval an agent wrote
+  // itself that names someone else's action never settles it (no approval laundering).
+  async function pairedToolAction(approval: { id: string; companyId: string; payload: unknown }) {
+    const actionRequestId = toolActionRequestIdOf(approval);
+    if (!actionRequestId) return null;
+    const [held] = await db
+      .select()
+      .from(toolActionRequests)
+      .where(and(
+        eq(toolActionRequests.id, actionRequestId),
+        eq(toolActionRequests.approvalId, approval.id),
+        eq(toolActionRequests.companyId, approval.companyId),
+      ))
+      .limit(1);
+    return held && held.approvalId === approval.id && held.companyId === approval.companyId ? held : null;
+  }
 
   async function lostReviewPathIssueIds(
     companyId: string,
@@ -314,10 +332,10 @@ export function approvalRoutes(
     // Aspireco: a tool action that already expired cannot run; say so instead of recording an
     // approval that does nothing, and clear it from the queue.
     const pendingApproval = await svc.getById(id);
-    const heldActionId = pendingApproval ? toolActionRequestIdOf(pendingApproval) : null;
-    if (pendingApproval && heldActionId && (pendingApproval.status === "pending" || pendingApproval.status === "revision_requested")) {
-      const [held] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, heldActionId)).limit(1);
-      const expired = !held || held.status === "expired" || held.status === "cancelled" || held.status === "rejected"
+    const held = pendingApproval ? await pairedToolAction(pendingApproval) : null;
+    const heldActionId = held?.id ?? null;
+    if (pendingApproval && held && (pendingApproval.status === "pending" || pendingApproval.status === "revision_requested")) {
+      const expired = held.status === "expired" || held.status === "cancelled" || held.status === "rejected"
         || (held.status === "pending" && held.expiresAt !== null && held.expiresAt <= new Date());
       if (expired) {
         await svc.cancel(id, "Expired before a decision; nothing was run.");
@@ -458,7 +476,7 @@ export function approvalRoutes(
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
 
-    const rejectedActionId = applied ? toolActionRequestIdOf(approval) : null;
+    const rejectedActionId = applied ? (await pairedToolAction(approval))?.id ?? null : null;
     if (rejectedActionId && options.toolActions) {
       try {
         await options.toolActions.decline({
