@@ -42,6 +42,7 @@ import { toolAccessService } from "../services/tool-access.js";
 import {
   createToolGatewayService,
   ToolGatewayHttpError,
+  toolActionTtlMs,
 } from "../services/tool-gateway.js";
 import { canonicalToolArguments, signToolArguments } from "../services/tool-content-guards.js";
 import {
@@ -1192,6 +1193,102 @@ describeEmbeddedPostgres("tool gateway service", () => {
     });
     expect(result.status).toBe("completed");
     expect((result.result as { result?: { data?: { target?: string } } }).result?.data?.target).toBe("repo");
+  });
+
+  async function heldDestructiveAction() {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review destructive tools",
+      policyType: "require_approval",
+      selectors: { toolName: "fixture:delete_everything" },
+    });
+    const gateway = createTestToolGatewayService(db, { pluginToolDispatcher: fakePluginDispatcher() });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    await expect(gateway.executeTool({
+      sessionToken: session.token,
+      tool: "fixture:delete_everything",
+      parameters: { target: "repo" },
+    })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [actionRequest] = await db.select().from(toolActionRequests);
+    return { company, gateway, actionRequest };
+  }
+
+  it("Aspireco: one board click on the card approves the formal approval too and goes on to execute", async () => {
+    const { company, gateway, actionRequest } = await heldDestructiveAction();
+
+    const approved = await gateway.approveActionRequest({
+      companyId: company.id,
+      actionRequestId: actionRequest.id,
+      actor: { userId: "board-user" },
+    });
+
+    // One click passed the formal-approval gate and reached execution. The plugin fixture itself
+    // only runs inside its originating run, so the server-side run stops there; a remote MCP tool
+    // (the Business OS connector) executes at this point.
+    const [inv] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, actionRequest.invocationId));
+    expect(inv.errorCode).toBe("approved_execution_unsupported");
+    expect(approved).not.toMatchObject({ reasonCode: "formal_approval_required" });
+    const [formal] = await db.select().from(approvals).where(eq(approvals.id, actionRequest.approvalId!));
+    expect(formal).toMatchObject({ status: "approved", decidedByUserId: "board-user" });
+  });
+
+  it("Aspireco: a card click on an expired action leaves the formal approval undecided", async () => {
+    const { company, gateway, actionRequest } = await heldDestructiveAction();
+    await db.update(toolActionRequests).set({ expiresAt: new Date(Date.now() - 1_000) })
+      .where(eq(toolActionRequests.id, actionRequest.id));
+
+    await expect(gateway.approveActionRequest({
+      companyId: company.id,
+      actionRequestId: actionRequest.id,
+      actor: { userId: "board-user" },
+    })).rejects.toMatchObject({ reasonCode: "action_expired" });
+    const [formal] = await db.select().from(approvals).where(eq(approvals.id, actionRequest.approvalId!));
+    expect(formal.status).toBe("pending");
+  });
+
+  it("Aspireco: an agent can never approve the formal approval through the card", async () => {
+    const { company, gateway, actionRequest } = await heldDestructiveAction();
+
+    await expect(gateway.approveActionRequest({
+      companyId: company.id,
+      actionRequestId: actionRequest.id,
+      actor: { agentId: "00000000-0000-4000-8000-000000000001" },
+    })).rejects.toMatchObject({ reasonCode: "human_review_required" });
+    const [formal] = await db.select().from(approvals).where(eq(approvals.id, actionRequest.approvalId!));
+    expect(formal.status).toBe("pending");
+  });
+
+  it("Aspireco: the sweep cancels the formal approval of an action that expired", async () => {
+    const { gateway, actionRequest } = await heldDestructiveAction();
+    await db.update(toolActionRequests).set({ expiresAt: new Date(Date.now() - 1_000) })
+      .where(eq(toolActionRequests.id, actionRequest.id));
+
+    await gateway.sweepActionReviews();
+
+    const [request] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, actionRequest.id));
+    expect(request.status).toBe("expired");
+    const [formal] = await db.select().from(approvals).where(eq(approvals.id, actionRequest.approvalId!));
+    expect(formal).toMatchObject({ status: "cancelled", decisionNote: "Expired before a decision; nothing was run." });
+  });
+
+  it("Aspireco: the review window comes from PAPERCLIP_TOOL_ACTION_TTL_MINUTES", async () => {
+    expect(toolActionTtlMs({})).toBe(60 * 60 * 1000);
+    expect(toolActionTtlMs({ PAPERCLIP_TOOL_ACTION_TTL_MINUTES: "1440" })).toBe(24 * 60 * 60 * 1000);
+    expect(toolActionTtlMs({ PAPERCLIP_TOOL_ACTION_TTL_MINUTES: "1" })).toBe(5 * 60 * 1000);
+    expect(toolActionTtlMs({ PAPERCLIP_TOOL_ACTION_TTL_MINUTES: "999999" })).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(toolActionTtlMs({ PAPERCLIP_TOOL_ACTION_TTL_MINUTES: "soon" })).toBe(60 * 60 * 1000);
+
+    const previous = process.env.PAPERCLIP_TOOL_ACTION_TTL_MINUTES;
+    process.env.PAPERCLIP_TOOL_ACTION_TTL_MINUTES = "1440";
+    try {
+      const { actionRequest } = await heldDestructiveAction();
+      const window = actionRequest.expiresAt!.getTime() - actionRequest.createdAt.getTime();
+      expect(window).toBeGreaterThan(23 * 60 * 60 * 1000);
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_TOOL_ACTION_TTL_MINUTES;
+      else process.env.PAPERCLIP_TOOL_ACTION_TTL_MINUTES = previous;
+    }
   });
 
   it("maps remote MCP elicitation to a durable issue interaction", async () => {

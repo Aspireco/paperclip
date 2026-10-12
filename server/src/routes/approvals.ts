@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
 import { eq } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { heartbeatRuns, toolActionRequests, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -40,9 +40,29 @@ function isStatusOnlyRecoveryContext(contextSnapshot: unknown) {
     context.resumeRequiresNormalModel === true;
 }
 
+// Aspireco: the tool gateway's own review calls, so a decision on a tool action's formal approval
+// also settles the held action (one click). Late-bound in app.ts: the gateway is built after this router.
+type ToolActionDecision = {
+  companyId: string;
+  actionRequestId: string;
+  actor: { agentId?: string | null; userId?: string | null };
+  reason?: string;
+};
+export type ApprovalToolActions = {
+  approve: (input: ToolActionDecision) => Promise<unknown>;
+  decline: (input: ToolActionDecision) => Promise<unknown>;
+};
+
+function toolActionRequestIdOf(approval: { payload: unknown }): string | null {
+  const payload = (approval.payload ?? {}) as Record<string, unknown>;
+  return payload.source === "tool_gateway" && typeof payload.actionRequestId === "string"
+    ? payload.actionRequestId
+    : null;
+}
+
 export function approvalRoutes(
   db: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: { pluginWorkerManager?: PluginWorkerManager; toolActions?: ApprovalToolActions } = {},
 ) {
   const router = Router();
   const svc = approvalService(db);
@@ -291,7 +311,36 @@ export function approvalRoutes(
       return;
     }
     const decidedByUserId = req.actor.userId ?? "board";
+    // Aspireco: a tool action that already expired cannot run; say so instead of recording an
+    // approval that does nothing, and clear it from the queue.
+    const pendingApproval = await svc.getById(id);
+    const heldActionId = pendingApproval ? toolActionRequestIdOf(pendingApproval) : null;
+    if (pendingApproval && heldActionId && (pendingApproval.status === "pending" || pendingApproval.status === "revision_requested")) {
+      const [held] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, heldActionId)).limit(1);
+      const expired = !held || held.status === "expired" || held.status === "cancelled" || held.status === "rejected"
+        || (held.status === "pending" && held.expiresAt !== null && held.expiresAt <= new Date());
+      if (expired) {
+        await svc.cancel(id, "Expired before a decision; nothing was run.");
+        res.status(409).json({
+          error: "This action expired before it was approved, so nothing was run. Ask the agent to try again.",
+          reasonCode: "action_expired",
+        });
+        return;
+      }
+    }
     const { approval, applied } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
+
+    if (applied && heldActionId && options.toolActions) {
+      try {
+        await options.toolActions.approve({
+          companyId: approval.companyId,
+          actionRequestId: heldActionId,
+          actor: { userId: decidedByUserId },
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id, actionRequestId: heldActionId }, "approved, but releasing the held tool action failed");
+      }
+    }
 
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
@@ -408,6 +457,20 @@ export function approvalRoutes(
     }
     const decidedByUserId = req.actor.userId ?? "board";
     const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
+
+    const rejectedActionId = applied ? toolActionRequestIdOf(approval) : null;
+    if (rejectedActionId && options.toolActions) {
+      try {
+        await options.toolActions.decline({
+          companyId: approval.companyId,
+          actionRequestId: rejectedActionId,
+          actor: { userId: decidedByUserId },
+          reason: req.body.decisionNote ?? undefined,
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id, actionRequestId: rejectedActionId }, "rejected, but declining the held tool action failed");
+      }
+    }
 
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);

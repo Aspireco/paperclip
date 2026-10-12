@@ -771,7 +771,14 @@ export async function createApp(
   api.use(goalRoutes(db));
   api.use(onboardingSeedRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
-  api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(approvalRoutes(db, {
+    pluginWorkerManager: workerManager,
+    // Late-bound: toolGateway is constructed further down; these run only on a request.
+    toolActions: {
+      approve: (input) => toolGateway.approveActionRequest(input),
+      decline: (input) => toolGateway.declineActionRequest(input),
+    },
+  }));
   api.use(secretRoutes(db));
   api.use(managedAgentProfileRoutes(db));
   api.use(remoteAgentProfileRoutes(db));

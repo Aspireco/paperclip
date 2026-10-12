@@ -167,6 +167,14 @@ import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.j
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_SESSION_TTL_MS = 60 * 60 * 1000;
+
+// Aspireco: how long a held tool action waits for the board. Default 60 minutes (upstream);
+// PAPERCLIP_TOOL_ACTION_TTL_MINUTES sets it, clamped to 5 minutes .. 7 days.
+export function toolActionTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const minutes = Number(env.PAPERCLIP_TOOL_ACTION_TTL_MINUTES);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 60 * 60 * 1000;
+  return Math.min(Math.max(Math.round(minutes), 5), 7 * 24 * 60) * 60 * 1000;
+}
 const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
 
 export function resolveCredentialGrantKind(
@@ -2284,7 +2292,7 @@ export function createToolGatewayService(
       );
     }
     const actionRequest = input.actionRequest;
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + toolActionTtlMs());
 
     let signedArguments: ReturnType<typeof signToolArguments>;
     try {
@@ -9096,7 +9104,7 @@ export function createToolGatewayService(
             canonicalArgumentsSummary: argumentValidation.summary,
             signedArguments,
             previewMarkdown,
-            expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+            expiresAt: new Date(Date.now() + toolActionTtlMs()),
             updatedAt: new Date(),
           })
           .where(eq(toolActionRequests.id, recorded.actionRequest.id));
@@ -9354,6 +9362,14 @@ export function createToolGatewayService(
             errorCode,
             errorMessage,
           });
+          // Aspireco: an expired action takes its formal approval with it, so the Approvals page
+          // never offers to approve something that can no longer run.
+          if (status === "expired" && row.approvalId) {
+            await db
+              .update(approvals)
+              .set({ status: "cancelled", decisionNote: "Expired before a decision; nothing was run.", decidedAt: now, updatedAt: now })
+              .where(and(eq(approvals.id, row.approvalId), inArray(approvals.status, ["pending", "revision_requested"])));
+          }
         }
         scanned += rows.length;
         if (rows.length < 100) break;
@@ -9499,6 +9515,32 @@ export function createToolGatewayService(
             ),
           )
           .limit(1);
+        // Aspireco: one human decision covers both records. A board user approving the card
+        // approves its paired formal approval too, so a destructive action is one click from
+        // either the task card or the Approvals page (routes/approvals.ts does the reverse).
+        const decidingUserId = input.actor.userId ?? null;
+        const requestExpired =
+          actionRequest.status === "pending" &&
+          Boolean(actionRequest.expiresAt && actionRequest.expiresAt <= new Date());
+        if (requestExpired)
+          throw new ToolGatewayHttpError(409, "Tool review has expired", "action_expired");
+        if (
+          formalApproval &&
+          decidingUserId &&
+          (formalApproval.status === "pending" || formalApproval.status === "revision_requested")
+        ) {
+          const decidedAt = new Date();
+          await db
+            .update(approvals)
+            .set({ status: "approved", decidedByUserId: decidingUserId, decidedAt, updatedAt: decidedAt })
+            .where(
+              and(
+                eq(approvals.id, actionRequest.approvalId),
+                inArray(approvals.status, ["pending", "revision_requested"]),
+              ),
+            );
+          formalApproval.status = "approved";
+        }
         if (!formalApproval || formalApproval.status !== "approved") {
           throw new ToolGatewayHttpError(
             409,
