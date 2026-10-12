@@ -1425,6 +1425,14 @@ function providerEffectPayload(
 
 export interface ChatChannelServiceOptions {
   /**
+   * Aspireco: one-tap approve/reject buttons on Telegram approval alerts. Called for a Telegram
+   * action from a linked, active, non-viewer member; returns the status line to show, or null when
+   * the action is not an approval button (normal handling continues).
+   */
+  approvalButtons?: {
+    handle(input: { actionId: string; userId: string; companyId: string }): Promise<string | null>;
+  };
+  /**
    * Provider webhooks await only the durable ingress write, then finish task
    * processing outside the provider response budget. Tests may leave this off
    * when they need direct callback assertions.
@@ -3549,6 +3557,61 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         scheduledConversationDrains.delete(key);
       }
     });
+  }
+
+  // Aspireco: acknowledge an approval-button tap and replace the buttons with the outcome.
+  async function settleTelegramApprovalButton(endpoint: EndpointRow, raw: unknown, status: string) {
+    const query = ((raw as { callback_query?: unknown })?.callback_query ?? raw) as {
+      id?: unknown;
+      message?: { chat?: { id?: unknown }; message_id?: unknown; text?: unknown };
+    };
+    try {
+      const credentials = await resolveCredentials(endpoint);
+      if (!credentials.botToken) return;
+      const call = (method: string, body: Record<string, unknown>) =>
+        fetchImpl(`https://api.telegram.org/bot${encodeURIComponent(credentials.botToken!)}/${method}`, {
+          method: "POST",
+          redirect: "error",
+          signal: AbortSignal.timeout(PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS),
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }).catch(() => null);
+      if (typeof query?.id === "string") {
+        await call("answerCallbackQuery", { callback_query_id: query.id, text: status.slice(0, 190) });
+      }
+      const chatId = query?.message?.chat?.id;
+      const messageId = query?.message?.message_id;
+      if ((typeof chatId === "number" || typeof chatId === "string") && typeof messageId === "number") {
+        const text = typeof query.message?.text === "string" ? query.message.text : "";
+        await call("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: `${text}\n\n${status}`.slice(0, 4000),
+          disable_web_page_preview: true,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, endpointId: endpoint.id }, "approval button: could not update the Telegram message");
+    }
+  }
+
+  // Aspireco: send a message through an active Telegram endpoint's own bot (approval alerts).
+  async function sendTelegramMessage(endpointId: string, body: Record<string, unknown>): Promise<boolean> {
+    const record = await endpointRecord(endpointId);
+    if (!record || record.endpoint.provider !== "telegram" || record.endpoint.status !== "active") return false;
+    const credentials = await resolveCredentials(record.endpoint);
+    if (!credentials.botToken) return false;
+    const response = await fetchImpl(
+      `https://api.telegram.org/bot${encodeURIComponent(credentials.botToken)}/sendMessage`,
+      {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ).catch(() => null);
+    return Boolean(response?.ok);
   }
 
   async function endpointRecord(endpointId: string) {
@@ -20247,6 +20310,17 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       principal.principal.isBot
     ) {
       return deny({ principalId: principal.principal.id });
+    }
+    if (event.provider === "telegram" && options.approvalButtons) {
+      const status = await options.approvalButtons.handle({
+        actionId: event.event.actionId,
+        userId: principal.userId,
+        companyId: record.endpoint.companyId,
+      });
+      if (status !== null) {
+        await settleTelegramApprovalButton(record.endpoint, event.event.raw, status);
+        return;
+      }
     }
     const isCorrection = isDiscordQuestionFormCorrectionId(
       event.event.actionId,
@@ -38397,6 +38471,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     replaceResources,
     listPrincipals,
     createLinkIntent,
+    sendTelegramMessage,
     previewIdentityLink,
     requestIdentityAccess,
     confirmIdentityLink,

@@ -119,6 +119,30 @@ describeDb("approvalTelegramNotifier", () => {
     expect(telegram.sent[0].body.text).toBe("2 approvals are waiting in Paperclip: https://hq.example");
   });
 
+  it("with the endpoint bot, alerts carry Approve/Reject buttons; if that bot cannot send, the plain bot is used without buttons", async () => {
+    await company();
+    const viaEndpoint: Array<Record<string, unknown>> = [];
+    let endpointUp = true;
+    const telegram = fakeTelegram();
+    const notifier = approvalTelegramNotifier(db, {
+      sendViaEndpoint: async (body) => { viaEndpoint.push(body); return endpointUp; },
+      buttonsFor: (id) => ({ inline_keyboard: [[{ text: "✅ Approve", callback_data: `y${id}` }]] }),
+      botToken: "123:abc", chatId: "1", fetchImpl: telegram.fetchImpl,
+    });
+    await notifier.sweep();
+    const first = await approval("With buttons");
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
+    expect(viaEndpoint[0].reply_markup).toEqual({ inline_keyboard: [[{ text: "✅ Approve", callback_data: `y${first.id}` }]] });
+    expect(telegram.sent).toHaveLength(0);
+
+    endpointUp = false;
+    await approval("Endpoint down");
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
+    expect(telegram.sent).toHaveLength(1);
+    expect(telegram.sent[0].body).not.toHaveProperty("reply_markup");
+    expect(telegram.sent[0].body.text).toContain("Endpoint down");
+  });
+
   it("a failed send is retried on the next sweep, not dropped", async () => {
     await company();
     let ok = false;

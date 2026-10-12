@@ -9,6 +9,10 @@ const OPEN = ["pending", "revision_requested"] as const;
 const MAX_PER_SWEEP = 20;
 
 type Options = {
+  /** Send through a Paperclip Telegram endpoint's own bot (needed for buttons: taps reach Paperclip). */
+  sendViaEndpoint?: ((body: Record<string, unknown>) => Promise<boolean>) | null;
+  /** Inline keyboard for an approval (endpoint mode only). */
+  buttonsFor?: ((approvalId: string) => Record<string, unknown> | null) | null;
   botToken?: string | null;
   chatId?: string | null;
   publicBaseUrl?: string | null;
@@ -44,17 +48,30 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
   const chatId = options.chatId?.trim() || null;
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? (() => new Date());
-  const enabled = Boolean(botToken && chatId);
+  const viaEndpoint = options.sendViaEndpoint ?? null;
+  const enabled = Boolean((viaEndpoint || botToken) && chatId);
   const startedAt = now();
   const notified = new Set<string>();
   let catchUpDone = false;
 
-  async function send(text: string): Promise<boolean> {
+  async function send(text: string, approvalId?: string): Promise<boolean> {
+    const markup = approvalId && viaEndpoint ? options.buttonsFor?.(approvalId) ?? null : null;
+    const body = { chat_id: chatId, text, disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) };
+    if (viaEndpoint) {
+      try {
+        if (await viaEndpoint(body)) return true;
+      } catch {
+        // fall through to the plain bot
+      }
+      if (!botToken) return false;
+    }
+    // The plain bot's chat has no Paperclip webhook, so its alerts never carry buttons.
+    const { reply_markup: _buttons, ...plain } = body as typeof body & { reply_markup?: unknown };
     try {
       const res = await fetchImpl(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+        body: JSON.stringify(plain),
         signal: AbortSignal.timeout(10_000),
       });
       return res.ok;
@@ -105,7 +122,7 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
           issuePrefix: row.issuePrefix,
           payload: row.payload,
           publicBaseUrl: options.publicBaseUrl ?? null,
-        }));
+        }), row.id);
         if (ok) {
           notified.add(row.id);
           sent += 1;

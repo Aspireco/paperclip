@@ -1,3 +1,4 @@
+import { approvalButtonHandler } from "./services/approval-telegram-buttons.js";
 import { browserUseRoutes } from "./routes/browser-use.js";
 import { browserUseService } from "./services/browser-use.js";
 import { slackToolRoutes } from "./routes/slack-tools.js";
@@ -17,6 +18,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
+import { authUsers } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
 import {
   derivePaperclipViteHmrPort,
   type DeploymentExposure,
@@ -583,7 +586,18 @@ export async function createApp(
   const connectionIntentHeartbeat = heartbeatService(db, {
     pluginWorkerManager: workerManager,
   });
+  // Aspireco: Telegram approve/reject buttons. Late-bound: the approvals router is built further down.
+  const approvalButtonsHandler = approvalButtonHandler({
+    secret: process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET,
+    getApproval: (id) => approvalsRouter.getApproval(id),
+    decideApproval: (id, decision, userId) => approvalsRouter.decideApproval(id, decision, userId),
+    userLabel: async (userId) => {
+      const [user] = await db.select({ name: authUsers.name }).from(authUsers).where(eq(authUsers.id, userId)).limit(1);
+      return user?.name?.trim() || null;
+    },
+  });
   const chatChannels = chatChannelService(db, {
+    approvalButtons: approvalButtonsHandler,
     deferWebhookProcessing: true,
     heartbeat: connectionIntentHeartbeat,
     publicBaseUrl: opts.authPublicBaseUrl,
@@ -771,14 +785,15 @@ export async function createApp(
   api.use(goalRoutes(db));
   api.use(onboardingSeedRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
-  api.use(approvalRoutes(db, {
+  const approvalsRouter = approvalRoutes(db, {
     pluginWorkerManager: workerManager,
     // Late-bound: toolGateway is constructed further down; these run only on a request.
     toolActions: {
       approve: (input) => toolGateway.approveActionRequest(input),
       decline: (input) => toolGateway.declineActionRequest(input),
     },
-  }));
+  });
+  api.use(approvalsRouter);
   api.use(secretRoutes(db));
   api.use(managedAgentProfileRoutes(db));
   api.use(remoteAgentProfileRoutes(db));
@@ -853,6 +868,7 @@ export async function createApp(
   }));
   api.use(slackToolRoutes(db, opts.authPublicBaseUrl));
   app.locals.toolGateway = toolGateway;
+  app.locals.chatChannels = chatChannels;
   registerAssignedMcpGateway(db, toolGateway);
   app.locals.toolActionDeliveries = toolActionDeliveries;
   app.use(mcpGatewayProtocolRoutes(toolGateway));

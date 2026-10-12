@@ -321,14 +321,58 @@ export function approvalRoutes(
     res.json(issues);
   });
 
-  router.post("/approvals/:id/approve", validate(resolveApprovalSchema), async (req, res) => {
-    assertBoard(req);
-    const id = req.params.id as string;
-    if (!(await requireApprovalAccess(req, id))) {
-      res.status(404).json({ error: "Approval not found" });
-      return;
+  // Aspireco: the one decision path for an approval, shared by the board routes below and by
+  // Telegram's approve/reject buttons (chat-channels). Callers check access first.
+  async function decideApproval(
+    id: string,
+    decision: "approve" | "reject",
+    decidedByUserId: string,
+    decisionNote?: string | null,
+  ): Promise<
+    | { outcome: "expired" }
+    | { outcome: "decided"; approval: Awaited<ReturnType<typeof svc.approve>>["approval"]; applied: boolean }
+  > {
+    if (decision === "reject") {
+      const { approval, applied } = await svc.reject(id, decidedByUserId, decisionNote);
+
+      const rejectedActionId = applied ? (await pairedToolAction(approval))?.id ?? null : null;
+      if (rejectedActionId && options.toolActions) {
+        try {
+          await options.toolActions.decline({
+            companyId: approval.companyId,
+            actionRequestId: rejectedActionId,
+            actor: { userId: decidedByUserId },
+            reason: decisionNote ?? undefined,
+          });
+        } catch (err) {
+          logger.warn({ err, approvalId: approval.id, actionRequestId: rejectedActionId }, "rejected, but declining the held tool action failed");
+        }
+      }
+
+      if (applied) {
+        const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+        const lostReviewIssueIds = await lostReviewPathIssueIds(approval.companyId, linkedIssues);
+        await logActivity(db, {
+          companyId: approval.companyId,
+          actorType: "user",
+          actorId: decidedByUserId,
+          action: "approval.rejected",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { type: approval.type },
+        });
+        await queueAdditionalApprovalReviewPathWakes({
+          approvalId: approval.id,
+          approvalStatus: approval.status,
+          companyId: approval.companyId,
+          linkedIssues,
+          lostIssueIds: lostReviewIssueIds,
+          requestedByUserId: decidedByUserId,
+        });
+      }
+      return { outcome: "decided", approval, applied };
     }
-    const decidedByUserId = req.actor.userId ?? "board";
+
     // Aspireco: a tool action that already expired cannot run; say so instead of recording an
     // approval that does nothing, and clear it from the queue.
     const pendingApproval = await svc.getById(id);
@@ -339,14 +383,10 @@ export function approvalRoutes(
         || (held.status === "pending" && held.expiresAt !== null && held.expiresAt <= new Date());
       if (expired) {
         await svc.cancel(id, "Expired before a decision; nothing was run.");
-        res.status(409).json({
-          error: "This action expired before it was approved, so nothing was run. Ask the agent to try again.",
-          reasonCode: "action_expired",
-        });
-        return;
+        return { outcome: "expired" };
       }
     }
-    const { approval, applied } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
+    const { approval, applied } = await svc.approve(id, decidedByUserId, decisionNote);
 
     if (applied && heldActionId && options.toolActions) {
       try {
@@ -372,7 +412,7 @@ export function approvalRoutes(
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
-        actorId: req.actor.userId ?? "board",
+        actorId: decidedByUserId,
         action: "approval.approved",
         entityType: "approval",
         entityId: approval.id,
@@ -398,7 +438,7 @@ export function approvalRoutes(
               ...(primaryReviewPathContext ?? {}),
             },
             requestedByActorType: "user",
-            requestedByActorId: req.actor.userId ?? "board",
+            requestedByActorId: decidedByUserId,
             contextSnapshot: {
               source: "approval.approved",
               approvalId: approval.id,
@@ -415,7 +455,7 @@ export function approvalRoutes(
           await logActivity(db, {
             companyId: approval.companyId,
             actorType: "user",
-            actorId: req.actor.userId ?? "board",
+            actorId: decidedByUserId,
             action: "approval.requester_wakeup_queued",
             entityType: "approval",
             entityId: approval.id,
@@ -437,7 +477,7 @@ export function approvalRoutes(
           await logActivity(db, {
             companyId: approval.companyId,
             actorType: "user",
-            actorId: req.actor.userId ?? "board",
+            actorId: decidedByUserId,
             action: "approval.requester_wakeup_failed",
             entityType: "approval",
             entityId: approval.id,
@@ -459,11 +499,29 @@ export function approvalRoutes(
         alreadyWoken: primaryReviewPathWakeCovered && approval.requestedByAgentId && primaryIssueId
           ? { agentId: approval.requestedByAgentId, issueId: primaryIssueId }
           : null,
-        requestedByUserId: req.actor.userId ?? "board",
+        requestedByUserId: decidedByUserId,
       });
     }
 
-    res.json(redactApprovalPayload(approval));
+    return { outcome: "decided", approval, applied };
+  }
+
+  router.post("/approvals/:id/approve", validate(resolveApprovalSchema), async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    if (!(await requireApprovalAccess(req, id))) {
+      res.status(404).json({ error: "Approval not found" });
+      return;
+    }
+    const result = await decideApproval(id, "approve", req.actor.userId ?? "board", req.body.decisionNote);
+    if (result.outcome === "expired") {
+      res.status(409).json({
+        error: "This action expired before it was approved, so nothing was run. Ask the agent to try again.",
+        reasonCode: "action_expired",
+      });
+      return;
+    }
+    res.json(redactApprovalPayload(result.approval));
   });
 
   router.post("/approvals/:id/reject", validate(resolveApprovalSchema), async (req, res) => {
@@ -473,46 +531,9 @@ export function approvalRoutes(
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
-
-    const rejectedActionId = applied ? (await pairedToolAction(approval))?.id ?? null : null;
-    if (rejectedActionId && options.toolActions) {
-      try {
-        await options.toolActions.decline({
-          companyId: approval.companyId,
-          actionRequestId: rejectedActionId,
-          actor: { userId: decidedByUserId },
-          reason: req.body.decisionNote ?? undefined,
-        });
-      } catch (err) {
-        logger.warn({ err, approvalId: approval.id, actionRequestId: rejectedActionId }, "rejected, but declining the held tool action failed");
-      }
-    }
-
-    if (applied) {
-      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
-      const lostReviewIssueIds = await lostReviewPathIssueIds(approval.companyId, linkedIssues);
-      await logActivity(db, {
-        companyId: approval.companyId,
-        actorType: "user",
-        actorId: req.actor.userId ?? "board",
-        action: "approval.rejected",
-        entityType: "approval",
-        entityId: approval.id,
-        details: { type: approval.type },
-      });
-      await queueAdditionalApprovalReviewPathWakes({
-        approvalId: approval.id,
-        approvalStatus: approval.status,
-        companyId: approval.companyId,
-        linkedIssues,
-        lostIssueIds: lostReviewIssueIds,
-        requestedByUserId: req.actor.userId ?? "board",
-      });
-    }
-
-    res.json(redactApprovalPayload(approval));
+    const result = await decideApproval(id, "reject", req.actor.userId ?? "board", req.body.decisionNote);
+    if (result.outcome === "expired") throw new Error("unreachable: a rejection never expires");
+    res.json(redactApprovalPayload(result.approval));
   });
 
   router.post(
@@ -610,5 +631,5 @@ export function approvalRoutes(
     res.status(201).json(comment);
   });
 
-  return router;
+  return Object.assign(router, { decideApproval, getApproval: (id: string) => svc.getById(id) });
 }

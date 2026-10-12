@@ -1,5 +1,6 @@
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { approvalTelegramNotifier } from "./services/approval-telegram-notifier.js";
+import { approvalButtons } from "./services/approval-telegram-buttons.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
 // Kicks off the OTel bootstrap as early as possible (no-op unless
@@ -1308,7 +1309,15 @@ async function startServerWithDatabaseTeardown(
   if (heartbeat) {
     const secretProposals = createSecretProposalsService(db as any);
     // Aspireco: Telegram alert when an approval is waiting (off unless both env vars are set).
+    // With PAPERCLIP_APPROVAL_TELEGRAM_ENDPOINT_ID the alert goes through that Paperclip Telegram bot
+    // with Approve/Reject buttons; otherwise through the plain bot token without buttons.
+    const approvalAlertEndpointId = process.env.PAPERCLIP_APPROVAL_TELEGRAM_ENDPOINT_ID?.trim() || null;
+    const approvalAlertSecret = process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET;
     const approvalAlerts = approvalTelegramNotifier(db as any, {
+      sendViaEndpoint: approvalAlertEndpointId
+        ? (body) => app.locals.chatChannels.sendTelegramMessage(approvalAlertEndpointId, body)
+        : null,
+      buttonsFor: approvalAlertSecret ? (approvalId) => approvalButtons(approvalAlertSecret, approvalId) : null,
       botToken: process.env.PAPERCLIP_APPROVAL_TELEGRAM_BOT_TOKEN,
       chatId: process.env.PAPERCLIP_APPROVAL_TELEGRAM_CHAT_ID,
       publicBaseUrl: config.authPublicBaseUrl ?? null,
