@@ -1,4 +1,5 @@
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
+import { approvalTelegramNotifier } from "./services/approval-telegram-notifier.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
 // Kicks off the OTel bootstrap as early as possible (no-op unless
@@ -1306,6 +1307,12 @@ async function startServerWithDatabaseTeardown(
 
   if (heartbeat) {
     const secretProposals = createSecretProposalsService(db as any);
+    // Aspireco: Telegram alert when an approval is waiting (off unless both env vars are set).
+    const approvalAlerts = approvalTelegramNotifier(db as any, {
+      botToken: process.env.PAPERCLIP_APPROVAL_TELEGRAM_BOT_TOKEN,
+      chatId: process.env.PAPERCLIP_APPROVAL_TELEGRAM_CHAT_ID,
+      publicBaseUrl: config.authPublicBaseUrl ?? null,
+    });
     const decisionExecutor = decisionService(db as any, decisionServiceOptions);
     const retentionExecutor = decisionRetentionService(db as any, {
       notifyOriginAgent: createDecisionRetentionNotifyOriginAgent(heartbeat.wakeup),
@@ -1755,6 +1762,7 @@ async function startServerWithDatabaseTeardown(
           }));
 
         trackHeartbeatSchedulerWork(chatCompletionDeliveries.sweepPending().catch((err) => logger.error({ err }, "chat completion delivery failed")));
+        trackHeartbeatSchedulerWork(approvalAlerts.sweep().catch((err) => logger.error({ err }, "approval telegram alert sweep failed")));
         trackHeartbeatSchedulerWork(connectionDeliveries.sweepPending().catch((err) => logger.error({ err }, "connection continuation delivery failed")));
         trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "tool review recovery failed")));
         trackHeartbeatSchedulerWork(app.locals.toolActionDeliveries.sweepPending().catch((err: unknown) => logger.error({ err }, "tool review delivery sweep failed")));
