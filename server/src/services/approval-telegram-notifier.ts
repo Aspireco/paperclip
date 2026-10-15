@@ -50,9 +50,12 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
   const now = options.now ?? (() => new Date());
   const viaEndpoint = options.sendViaEndpoint ?? null;
   const enabled = Boolean((viaEndpoint || botToken) && chatId);
+  // With buttons, approvals already waiting at startup are re-sent one by one: an alert sent before the
+  // restart may have gone out through the plain bot without them (Aspireco 2026-10-15).
+  const withButtons = Boolean(viaEndpoint && options.buttonsFor);
   const startedAt = now();
   const notified = new Set<string>();
-  let catchUpDone = false;
+  let catchUpDone = withButtons;
 
   async function send(text: string, approvalId?: string): Promise<boolean> {
     const markup = approvalId && viaEndpoint ? options.buttonsFor?.(approvalId) ?? null : null;
@@ -110,7 +113,7 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
         })
         .from(approvals)
         .innerJoin(companies, eq(companies.id, approvals.companyId))
-        .where(and(inArray(approvals.status, [...OPEN]), gte(approvals.createdAt, startedAt)))
+        .where(and(inArray(approvals.status, [...OPEN]), withButtons ? undefined : gte(approvals.createdAt, startedAt)))
         .orderBy(asc(approvals.createdAt))
         .limit(MAX_PER_SWEEP + notified.size);
 

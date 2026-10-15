@@ -143,6 +143,27 @@ describeDb("approvalTelegramNotifier", () => {
     expect(telegram.sent[0].body.text).toContain("Endpoint down");
   });
 
+  // Aspireco 2026-10-15: an alert sent before a restart may have gone out through the plain bot (no
+  // buttons), so with the endpoint bot whatever is still waiting is re-sent, each with its own buttons.
+  it("with the endpoint bot, approvals already waiting at a restart are re-sent one by one with their buttons", async () => {
+    await company();
+    const waiting = await approval("Waiting since before the restart", "pending", new Date(Date.now() - 60_000));
+    const viaEndpoint: Array<Record<string, unknown>> = [];
+    const telegram = fakeTelegram();
+    const notifier = approvalTelegramNotifier(db, {
+      sendViaEndpoint: async (body) => { viaEndpoint.push(body); return true; },
+      buttonsFor: (id) => ({ inline_keyboard: [[{ text: "✅ Approve", callback_data: `y${id}` }]] }),
+      botToken: "123:abc", chatId: "1", fetchImpl: telegram.fetchImpl,
+    });
+
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
+    expect(await notifier.sweep()).toEqual({ sent: 0 });
+    expect(viaEndpoint).toHaveLength(1);
+    expect(String(viaEndpoint[0].text)).toContain("Waiting since before the restart");
+    expect(viaEndpoint[0].reply_markup).toEqual({ inline_keyboard: [[{ text: "✅ Approve", callback_data: `y${waiting.id}` }]] });
+    expect(telegram.sent).toHaveLength(0);
+  });
+
   it("a failed send is retried on the next sweep, not dropped", async () => {
     await company();
     let ok = false;
