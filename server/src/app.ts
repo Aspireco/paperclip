@@ -1,4 +1,5 @@
 import { approvalButtonHandler } from "./services/approval-telegram-buttons.js";
+import { accessService } from "./services/access.js";
 import { browserUseRoutes } from "./routes/browser-use.js";
 import { browserUseService } from "./services/browser-use.js";
 import { slackToolRoutes } from "./routes/slack-tools.js";
@@ -590,7 +591,15 @@ export async function createApp(
   const approvalButtonsHandler = approvalButtonHandler({
     secret: process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET,
     getApproval: (id) => approvalsRouter.getApproval(id),
+    isActiveMember: async (userId, companyId) => {
+      const membership = await accessService(db).getMembership(companyId, "user", userId);
+      return Boolean(membership && membership.status === "active" && membership.membershipRole !== "viewer");
+    },
     decideApproval: (id, decision, userId) => approvalsRouter.decideApproval(id, decision, userId),
+    requestChange: async (approvalId, userId) => {
+      await approvalsRouter.requestRevision(approvalId, userId, "John asked for changes (Telegram). His note follows as a comment.");
+      return { promptText: "What should change? Reply to this message." };
+    },
     userLabel: async (userId) => {
       const [user] = await db.select({ name: authUsers.name }).from(authUsers).where(eq(authUsers.id, userId)).limit(1);
       return user?.name?.trim() || null;

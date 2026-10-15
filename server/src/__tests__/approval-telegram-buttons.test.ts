@@ -20,7 +20,7 @@ describe("approval button encoding", () => {
     for (const button of approvalButtons(SECRET, ID).inline_keyboard[0]) {
       expect(Buffer.byteLength(button.callback_data, "utf8")).toBeLessThanOrEqual(64);
     }
-    expect(approvalButtons(SECRET, ID).inline_keyboard[0].map((b) => b.text)).toEqual(["✅ Approve", "❌ Reject"]);
+    expect(approvalButtons(SECRET, ID).inline_keyboard[0].map((b) => b.text)).toEqual(["✅ Approve", "❌ Reject", "✏️ Change"]);
   });
 
   it("rejects a forged signature, a flipped decision, another approval's id, and a different secret", () => {
@@ -48,6 +48,8 @@ describe("approval button handler", () => {
       secret: SECRET,
       getApproval: async () => approval,
       decideApproval,
+      isActiveMember: async (_u: string, c: string) => c === "co-1",
+      requestChange: vi.fn(async () => ({ promptText: "What should change? Reply to this message." })),
       userLabel: async () => "John",
     });
     return { handler, decideApproval };
@@ -98,5 +100,45 @@ describe("approval button handler", () => {
   it("leaves non-approval actions to normal chat handling", async () => {
     const { handler } = setup(pending);
     expect(await handler.handle({ actionId: "question-1", userId: "u", companyId: "co-1" })).toBeNull();
+  });
+});
+
+describe("cross-company and change", () => {
+  const NORPEX = "c09ef533-845c-4bad-a3fe-46ccc53ada7c";
+  const HQ = "a62c615c-51b6-4bb0-b03f-78e61c919919";
+  const pending = { id: ID, companyId: NORPEX, status: "pending" };
+
+  function handler(member: boolean) {
+    return approvalButtonHandler({
+      secret: SECRET,
+      getApproval: async () => pending,
+      isActiveMember: vi.fn(async (_u: string, c: string) => member && c === NORPEX),
+      decideApproval: vi.fn(async () => ({ outcome: "decided" as const, approval: { ...pending, status: "approved" }, applied: true })),
+      requestChange: vi.fn(async () => ({ promptText: "What should change? Reply to this message." })),
+    });
+  }
+
+  it("decides a Norpex approval tapped through the HQ endpoint when the user is a Norpex member", async () => {
+    const h = handler(true);
+    const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "u1", companyId: HQ });
+    expect(out).toBe("✅ Approved");
+  });
+
+  it("non-member: refuses and decides nothing", async () => {
+    const h = handler(false);
+    const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "u1", companyId: HQ });
+    expect(out).toBe("This approval is not available here.");
+  });
+
+  it("change: asks what should change with a force-reply prompt", async () => {
+    const h = handler(true);
+    const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "change", ID), userId: "u1", companyId: HQ });
+    expect(out).toEqual({ status: "✏️ Changes requested", forceReply: "What should change? Reply to this message.", approvalId: ID });
+  });
+
+  it("has three buttons, each within 64 bytes", () => {
+    const row = approvalButtons(SECRET, ID).inline_keyboard[0];
+    expect(row.map((b) => b.text)).toEqual(["✅ Approve", "❌ Reject", "✏️ Change"]);
+    for (const b of row) expect(Buffer.byteLength(b.callback_data, "utf8")).toBeLessThanOrEqual(64);
   });
 });

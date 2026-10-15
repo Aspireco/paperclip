@@ -1315,7 +1315,10 @@ async function startServerWithDatabaseTeardown(
     const approvalAlertSecret = process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET;
     const approvalAlerts = approvalTelegramNotifier(db as any, {
       sendViaEndpoint: approvalAlertEndpointId
-        ? (body) => app.locals.chatChannels.sendTelegramMessage(approvalAlertEndpointId, body)
+        ? (body) =>
+            app.locals.chatChannels
+              .sendTelegramMessage(approvalAlertEndpointId, body)
+              .then((r: { ok: boolean; messageId?: number }) => r.ok)
         : null,
       buttonsFor: approvalAlertSecret ? (approvalId) => approvalButtons(approvalAlertSecret, approvalId) : null,
       botToken: process.env.PAPERCLIP_APPROVAL_TELEGRAM_BOT_TOKEN,

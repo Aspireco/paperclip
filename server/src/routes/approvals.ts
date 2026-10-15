@@ -631,5 +631,26 @@ export function approvalRoutes(
     res.status(201).json(comment);
   });
 
-  return Object.assign(router, { decideApproval, getApproval: (id: string) => svc.getById(id) });
+  // Aspireco: request a revision outside the board route, for Telegram's Change button.
+  async function requestChangeRevision(id: string, decidedByUserId: string, decisionNote?: string | null) {
+    const approval = await svc.requestRevision(id, decidedByUserId, decisionNote);
+
+    await logActivity(db, {
+      companyId: approval.companyId,
+      actorType: "user",
+      actorId: decidedByUserId,
+      action: "approval.revision_requested",
+      entityType: "approval",
+      entityId: approval.id,
+      details: { type: approval.type },
+    });
+
+    return approval;
+  }
+
+  return Object.assign(router, {
+    decideApproval,
+    getApproval: (id: string) => svc.getById(id),
+    requestRevision: requestChangeRevision,
+  });
 }

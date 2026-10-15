@@ -1430,7 +1430,17 @@ export interface ChatChannelServiceOptions {
    * the action is not an approval button (normal handling continues).
    */
   approvalButtons?: {
-    handle(input: { actionId: string; userId: string; companyId: string }): Promise<string | null>;
+    handle(
+      input: { actionId: string; userId: string; companyId: string },
+    ): Promise<string | { status: string; forceReply: string; approvalId: string } | null>;
+  };
+  /**
+   * Aspireco: remembers a Change force-reply prompt so chat-channels can match John's next reply
+   * back to the approval it asked about. Optional until Task 5 supplies the implementation.
+   */
+  changePrompts?: {
+    remember(messageId: number, approvalId: string, userId: string): void;
+    capture(replyToMessageId: number, userId: string, text: string): Promise<boolean>;
   };
   /**
    * Provider webhooks await only the durable ingress write, then finish task
@@ -3559,6 +3569,14 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     });
   }
 
+  // Aspireco: the Telegram chat a callback query arrived in (for the Change force-reply prompt).
+  function telegramChatIdFrom(raw: unknown): unknown {
+    const query = ((raw as { callback_query?: unknown })?.callback_query ?? raw) as {
+      message?: { chat?: { id?: unknown } };
+    };
+    return query?.message?.chat?.id;
+  }
+
   // Aspireco: acknowledge an approval-button tap and replace the buttons with the outcome.
   async function settleTelegramApprovalButton(endpoint: EndpointRow, raw: unknown, status: string) {
     const query = ((raw as { callback_query?: unknown })?.callback_query ?? raw) as {
@@ -3596,11 +3614,14 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   }
 
   // Aspireco: send a message through an active Telegram endpoint's own bot (approval alerts).
-  async function sendTelegramMessage(endpointId: string, body: Record<string, unknown>): Promise<boolean> {
+  async function sendTelegramMessage(
+    endpointId: string,
+    body: Record<string, unknown>,
+  ): Promise<{ ok: boolean; messageId?: number }> {
     const record = await endpointRecord(endpointId);
-    if (!record || record.endpoint.provider !== "telegram" || record.endpoint.status !== "active") return false;
+    if (!record || record.endpoint.provider !== "telegram" || record.endpoint.status !== "active") return { ok: false };
     const credentials = await resolveCredentials(record.endpoint);
-    if (!credentials.botToken) return false;
+    if (!credentials.botToken) return { ok: false };
     const response = await fetchImpl(
       `https://api.telegram.org/bot${encodeURIComponent(credentials.botToken)}/sendMessage`,
       {
@@ -3611,7 +3632,10 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         body: JSON.stringify(body),
       },
     ).catch(() => null);
-    return Boolean(response?.ok);
+    if (!response?.ok) return { ok: false };
+    const payload = (await response.json().catch(() => null)) as { result?: { message_id?: unknown } } | null;
+    const messageId = payload?.result?.message_id;
+    return { ok: true, messageId: typeof messageId === "number" ? messageId : undefined };
   }
 
   async function endpointRecord(endpointId: string) {
@@ -20318,7 +20342,18 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         companyId: record.endpoint.companyId,
       });
       if (status !== null) {
-        await settleTelegramApprovalButton(record.endpoint, event.event.raw, status);
+        const line = typeof status === "string" ? status : status.status;
+        await settleTelegramApprovalButton(record.endpoint, event.event.raw, line);
+        if (typeof status !== "string") {
+          const sent = await sendTelegramMessage(record.endpoint.id, {
+            chat_id: telegramChatIdFrom(event.event.raw),
+            text: status.forceReply,
+            reply_markup: { force_reply: true, input_field_placeholder: "What should change?" },
+          });
+          if (sent.ok && sent.messageId !== undefined) {
+            options.changePrompts?.remember(sent.messageId, status.approvalId, principal.userId);
+          }
+        }
         return;
       }
     }
