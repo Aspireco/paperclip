@@ -217,6 +217,10 @@ import {
   unprocessable,
 } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import {
+  finalizeTelegramChangePromptCapture,
+  telegramChangePromptCandidate,
+} from "./approval-change-prompts.js";
 import { redactSensitiveText } from "../redaction.js";
 import type { StorageService } from "../storage/types.js";
 import {
@@ -15595,32 +15599,64 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       // change?" — post it as a comment on that approval instead of routing it to the agent as an
       // ordinary message. Same principal bar as the approval buttons: a linked, active, non-bot
       // member, never a guest or unlinked sender, so only the one who tapped Change can be captured.
-      if (
-        endpoint.provider === "telegram" &&
-        options.changePrompts &&
-        !principalResolution.linkedDenied &&
-        principalResolution.userId &&
-        principalResolution.principal.kind === "user" &&
-        !principalResolution.principal.isBot
-      ) {
-        const replyTo = (
-          message.raw as { reply_to_message?: { message_id?: unknown } } | null
-        )?.reply_to_message?.message_id;
-        if (
-          typeof replyTo === "number" &&
-          (await options.changePrompts.capture(
-            replyTo,
-            principalResolution.userId,
-            message.text,
-          ))
-        ) {
-          const chatId = (message.raw as { chat?: { id?: unknown } } | null)?.chat?.id;
-          if (chatId !== undefined) {
-            await sendTelegramMessage(endpoint.id, {
-              chat_id: chatId,
-              text: "✏️ Sent to the agent.",
-            });
-          }
+      // The decision and the post-capture finalization are pulled into approval-change-prompts.ts
+      // (telegramChangePromptCandidate / finalizeTelegramChangePromptCapture) so both are
+      // unit-testable without loading this module.
+      const changePromptCandidate = options.changePrompts
+        ? telegramChangePromptCandidate({
+            provider: endpoint.provider,
+            principal: {
+              linkedDenied: principalResolution.linkedDenied,
+              userId: principalResolution.userId,
+              kind: principalResolution.principal.kind,
+              isBot: principalResolution.principal.isBot,
+            },
+            raw: message.raw,
+            text: message.text,
+          })
+        : null;
+      if (changePromptCandidate) {
+        // Aspireco (C1, fix round 1): if this throws (the comment did not land), let it
+        // propagate to the outer catch below, which marks the delivery "retry"/"failed" the
+        // normal way. The prompt itself is untouched on failure (see approval-change-prompts.ts),
+        // so a retry of this same reply can capture it again.
+        const captured = await options.changePrompts!.capture(
+          changePromptCandidate.replyTo,
+          changePromptCandidate.userId,
+          changePromptCandidate.text,
+        );
+        if (captured) {
+          // Aspireco (C1, fix round 1): mark the delivery final here, exactly like the existing
+          // filtered path further down — otherwise it is still "processing", the redrive sweep
+          // (DELIVERY_PROCESSING_STALE_MS) re-runs this function once it goes stale, the prompt
+          // is already consumed, capture() now returns false, and John's reply is posted into
+          // ordinary agent chat after he was told "Sent to the agent."
+          await finalizeTelegramChangePromptCapture({
+            chatId: (message.raw as { chat?: { id?: unknown } } | null)?.chat?.id,
+            sendConfirmation: (chatId) =>
+              sendTelegramMessage(endpoint.id, {
+                chat_id: chatId,
+                text: "✏️ Sent to the agent.",
+              }),
+            markDeliveryProcessed: () =>
+              db
+                .update(chatDeliveries)
+                .set({
+                  state: "processed",
+                  principalId: principalResolution.principal.id,
+                  nextAttemptAt: null,
+                  redactedError: "Captured as approval Change reply",
+                  processedAt: new Date(),
+                  updatedAt: new Date(),
+                })
+                .where(eq(chatDeliveries.id, activeDelivery.id))
+                .then(() => undefined),
+            onConfirmationError: (err) =>
+              logger.warn(
+                { err, endpointId: endpoint.id },
+                "change prompt: could not send the confirmation message",
+              ),
+          });
           return;
         }
       }

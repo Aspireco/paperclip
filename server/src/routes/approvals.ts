@@ -650,6 +650,15 @@ export function approvalRoutes(
 
   // Aspireco: add a comment outside the board route, for a Telegram Change-prompt reply (Task 5).
   // Same persistence and activity logging as POST /approvals/:id/comments.
+  //
+  // I2 (controller ruling, fix round 1, 2026-10-15): the original brief assumed an approval comment
+  // alone wakes the requesting agent. It does not — agents don't read approval comments. So this also
+  // posts the same note on the approval's linked issue(s) through the same `issueService().addComment`
+  // the board's issue-comment route uses, and separately wakes the requesting agent the way
+  // `decideApproval` does above (`heartbeat.wakeup`), since posting an issue comment does not itself
+  // enqueue a wake outside the live agent-chat path. Both failure paths are caught and logged rather
+  // than thrown: the approval comment (the record of what John asked for) must not be lost because the
+  // issue mirror or the wake failed.
   async function addApprovalComment(id: string, userId: string, body: string) {
     const comment = await svc.addComment(id, body, { userId });
 
@@ -662,6 +671,53 @@ export function approvalRoutes(
       entityId: id,
       details: { commentId: comment.id },
     });
+
+    const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(id).catch(() => []);
+    for (const issue of linkedIssues) {
+      try {
+        await issuesSvc.addComment(issue.id, body, { userId }, { authorType: "user" });
+      } catch (err) {
+        logger.warn(
+          { err, approvalId: id, issueId: issue.id },
+          "could not mirror the Change reply onto the linked issue",
+        );
+      }
+    }
+
+    const approval = await svc.getById(id).catch(() => null);
+    if (approval?.requestedByAgentId) {
+      const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+      try {
+        const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "approval_change_requested",
+          payload: { approvalId: id, issueIds: linkedIssueIds },
+          requestedByActorType: "user",
+          requestedByActorId: userId,
+          contextSnapshot: {
+            source: "approval.change_comment",
+            approvalId: id,
+            issueIds: linkedIssueIds,
+            wakeReason: "approval_change_requested",
+          },
+        });
+        await logActivity(db, {
+          companyId: comment.companyId,
+          actorType: "user",
+          actorId: userId,
+          action: "approval.requester_wakeup_queued",
+          entityType: "approval",
+          entityId: id,
+          details: { requesterAgentId: approval.requestedByAgentId, wakeRunId: wakeRun?.id ?? null, linkedIssueIds },
+        });
+      } catch (err) {
+        logger.warn(
+          { err, approvalId: id, requestedByAgentId: approval.requestedByAgentId },
+          "failed to queue requester wakeup after a Change reply comment",
+        );
+      }
+    }
 
     return comment;
   }
