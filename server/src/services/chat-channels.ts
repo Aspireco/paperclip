@@ -15591,6 +15591,39 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         message.author,
         message.raw,
       );
+      // Aspireco: a reply to the ✏️ Change force-reply prompt is John's answer to "what should
+      // change?" — post it as a comment on that approval instead of routing it to the agent as an
+      // ordinary message. Same principal bar as the approval buttons: a linked, active, non-bot
+      // member, never a guest or unlinked sender, so only the one who tapped Change can be captured.
+      if (
+        endpoint.provider === "telegram" &&
+        options.changePrompts &&
+        !principalResolution.linkedDenied &&
+        principalResolution.userId &&
+        principalResolution.principal.kind === "user" &&
+        !principalResolution.principal.isBot
+      ) {
+        const replyTo = (
+          message.raw as { reply_to_message?: { message_id?: unknown } } | null
+        )?.reply_to_message?.message_id;
+        if (
+          typeof replyTo === "number" &&
+          (await options.changePrompts.capture(
+            replyTo,
+            principalResolution.userId,
+            message.text,
+          ))
+        ) {
+          const chatId = (message.raw as { chat?: { id?: unknown } } | null)?.chat?.id;
+          if (chatId !== undefined) {
+            await sendTelegramMessage(endpoint.id, {
+              chat_id: chatId,
+              text: "✏️ Sent to the agent.",
+            });
+          }
+          return;
+        }
+      }
       const mayEnableSetupDestination =
         // Slack channels start enabled. Never use first-test activation to
         // override an existing channel the operator explicitly disabled.

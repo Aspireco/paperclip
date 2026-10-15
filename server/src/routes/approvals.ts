@@ -648,9 +648,28 @@ export function approvalRoutes(
     return approval;
   }
 
+  // Aspireco: add a comment outside the board route, for a Telegram Change-prompt reply (Task 5).
+  // Same persistence and activity logging as POST /approvals/:id/comments.
+  async function addApprovalComment(id: string, userId: string, body: string) {
+    const comment = await svc.addComment(id, body, { userId });
+
+    await logActivity(db, {
+      companyId: comment.companyId,
+      actorType: "user",
+      actorId: userId,
+      action: "approval.comment_added",
+      entityType: "approval",
+      entityId: id,
+      details: { commentId: comment.id },
+    });
+
+    return comment;
+  }
+
   return Object.assign(router, {
     decideApproval,
     getApproval: (id: string) => svc.getById(id),
     requestRevision: requestChangeRevision,
+    addComment: addApprovalComment,
   });
 }

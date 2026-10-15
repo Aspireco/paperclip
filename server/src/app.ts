@@ -1,4 +1,5 @@
 import { approvalButtonHandler, CHANGE_PROMPT_TEXT, decodeApprovalAction } from "./services/approval-telegram-buttons.js";
+import { changePrompts } from "./services/approval-change-prompts.js";
 import { approvalCards } from "./services/approval-telegram-cards.js";
 import { approvalCardRoutes } from "./routes/approval-cards.js";
 import { readSignedToolArguments } from "./services/tool-content-guards.js";
@@ -639,8 +640,18 @@ export async function createApp(
         : Promise.resolve(false),
   });
   app.locals.approvalCards = approvalCardsStore;
+  // Aspireco: John's reply to the ✏️ Change force-reply prompt is posted on that approval as his
+  // comment, which wakes the requesting agent. Late-bound like approvalButtonsHandler above: the
+  // approvals router is built further down.
+  const pendingChangePrompts = changePrompts({
+    addComment: async (id, userId, body) => {
+      await approvalsRouter.addComment(id, userId, body);
+    },
+    ttlMs: 24 * 60 * 60 * 1000,
+  });
   const chatChannels = chatChannelService(db, {
     approvalButtons: approvalButtonsHandler,
+    changePrompts: pendingChangePrompts,
     cards: approvalCardsStore,
     cardApprovalId: (actionId) => decodeApprovalAction(approvalCardsSecret, actionId)?.approvalId ?? null,
     deferWebhookProcessing: true,
