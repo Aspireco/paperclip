@@ -41,4 +41,26 @@ describe("approvalCards", () => {
     await approvalCards(d).send(ID, { text: "auto", parts: [] }, { buttons: false });
     expect(sent[0].reply_markup).toBeUndefined();
   });
+
+  it("isCardMessage matches only the tracked card's own message id", async () => {
+    const { d } = deps([{ ok: true, messageId: 20 }]);
+    const cards = approvalCards(d);
+    await cards.send(ID, { text: "card", parts: [] }, { buttons: true });
+    expect(cards.isCardMessage(ID, 20)).toBe(true);
+    expect(cards.isCardMessage(ID, 21)).toBe(false);
+    expect(cards.isCardMessage("other-id", 20)).toBe(false);
+  });
+
+  it("settle edits the card then forgets it, so a later settle or isCardMessage check is a no-op", async () => {
+    const { d } = deps([{ ok: true, messageId: 30 }]);
+    const cards = approvalCards(d);
+    await cards.send(ID, { text: "card", parts: [] }, { buttons: true });
+    await cards.settle(ID, "done");
+    expect(d.edit).toHaveBeenCalledWith(30, "done");
+    expect(cards.hasCard(ID)).toBe(false);
+    expect(cards.isCardMessage(ID, 30)).toBe(false);
+    d.edit.mockClear();
+    await cards.settle(ID, "again");
+    expect(d.edit).not.toHaveBeenCalled();
+  });
 });

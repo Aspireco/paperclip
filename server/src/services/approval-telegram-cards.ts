@@ -14,6 +14,10 @@ export function approvalCards(deps: {
 
   return {
     hasCard: (approvalId: string) => cardMessage.has(approvalId),
+    // Aspireco: exact match on the tracked card's own message id, not just "this approval has a
+    // card somewhere" — a chat-channels tap settle must never touch a message that merely shares
+    // the approval id (e.g. a stale alert) but isn't the card itself.
+    isCardMessage: (approvalId: string, messageId: number) => cardMessage.get(approvalId) === messageId,
     async send(approvalId: string, card: { text: string; parts: string[] }, opts: { buttons: boolean }) {
       const first = await deps.send({
         chat_id: deps.chatId,
@@ -40,7 +44,11 @@ export function approvalCards(deps: {
     },
     async settle(approvalId: string, line: string) {
       const id = cardMessage.get(approvalId);
-      if (id !== undefined) await deps.edit(id, line);
+      if (id === undefined) return;
+      await deps.edit(id, line);
+      // Settled: no longer the live card for this approval, so a later tap on a stale copy of
+      // the same message (or a reused approval id) is never mistaken for it.
+      cardMessage.delete(approvalId);
     },
   };
 }

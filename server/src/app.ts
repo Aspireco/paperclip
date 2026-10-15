@@ -616,6 +616,12 @@ export async function createApp(
   const approvalCardsSecret = process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET ?? "";
   const approvalCardsChatId = process.env.PAPERCLIP_APPROVAL_TELEGRAM_CHAT_ID ?? "";
   const approvalCardsEndpointId = process.env.PAPERCLIP_APPROVAL_TELEGRAM_ENDPOINT_ID?.trim() || null;
+  // Aspireco (I3 fix): an actionable card signed with an empty secret decodes for nobody — a
+  // button tap would always fail, leaving Hermes (and John) with a preview he can never act on.
+  // The telegram-card route fails closed on this instead of reporting 200.
+  const approvalCardsConfigured = Boolean(
+    approvalCardsSecret.trim() && approvalCardsChatId.trim() && approvalCardsEndpointId,
+  );
   const approvalCardsStore = approvalCards({
     secret: approvalCardsSecret,
     chatId: approvalCardsChatId,
@@ -867,9 +873,13 @@ export async function createApp(
       getApproval: (id) => approvalsRouter.getApproval(id),
       toolAction: approvalCardToolAction,
       cards: approvalCardsStore,
+      cardsConfigured: approvalCardsConfigured,
       decideApproval: (id, decision, userId, note) =>
         approvalsRouter.decideApproval(id, decision, userId, note),
-      rejectApproval: (id, note) => approvalsRouter.decideApproval(id, "reject", "auto-approver", note),
+      rejectApproval: async (id, note) => {
+        const result = await approvalsRouter.decideApproval(id, "reject", "auto-approver", note);
+        return { applied: result.outcome === "decided" && result.applied };
+      },
     }),
   );
   api.use(secretRoutes(db));

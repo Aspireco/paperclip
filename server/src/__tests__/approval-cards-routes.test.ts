@@ -9,11 +9,12 @@ const TOKEN = "hermes-test-token"; // pragma: allowlist secret
 function app(over: Partial<Parameters<typeof approvalCardRoutes>[0]> = {}) {
   const deps = {
     hermesToken: TOKEN,
+    cardsConfigured: true,
     getApproval: vi.fn(async () => ({ id: ID, companyId: "co", status: "pending" })),
     toolAction: vi.fn(async () => ({ tool: "mail_send", arguments: { op: "send_draft", params: { id: "d1" }, body: { expectedHash: "ab" } }, expiresAt: "2026-10-16T00:00:00Z" })),
-    cards: { send: vi.fn(async () => ({ ok: true, messageIds: [1] })), settle: vi.fn(async () => {}), hasCard: () => false },
+    cards: { send: vi.fn(async () => ({ ok: true, messageIds: [1] })), settle: vi.fn(async () => {}) },
     decideApproval: vi.fn(async () => ({ outcome: "decided", approval: { id: ID, status: "approved" }, applied: true })),
-    rejectApproval: vi.fn(async () => ({ id: ID, status: "rejected" })),
+    rejectApproval: vi.fn(async () => ({ applied: true })),
     ...over,
   };
   const a = express();
@@ -52,8 +53,99 @@ describe("approval card routes", () => {
   });
   it("supersede rejects with the superseded note and settles the card", async () => {
     const { a, deps } = app();
-    await request(a).post(`/api/approvals/${ID}/supersede`).set("authorization", `Bearer ${TOKEN}`);
+    const r = await request(a).post(`/api/approvals/${ID}/supersede`).set("authorization", `Bearer ${TOKEN}`);
+    expect(r.status).toBe(200);
     expect(deps.rejectApproval).toHaveBeenCalledWith(ID, "superseded: the content changed after the card");
     expect(deps.cards.settle).toHaveBeenCalledWith(ID, "↩️ Superseded - a new card follows");
+  });
+
+  // C1 regression: the four Hermes routes gate individually; everything else under
+  // /api/approvals/:id/* (board routes, mounted after this router) must never see a 401 just
+  // because it didn't carry the Hermes bearer.
+  describe("C1: no prefix gate on /approvals/:id", () => {
+    function appWithBoardStub() {
+      const { a, deps } = app();
+      a.get("/api/approvals/:id", (_req, res) => res.status(200).json({ from: "board-stub" }));
+      a.post("/api/approvals/:id/approve", (_req, res) => res.status(200).json({ from: "board-stub" }));
+      return { a, deps };
+    }
+    it("a board route reaches its own handler with no bearer at all", async () => {
+      const { a } = appWithBoardStub();
+      const r = await request(a).get(`/api/approvals/${ID}`);
+      expect(r.status).toBe(200);
+      expect(r.body.from).toBe("board-stub");
+    });
+    it("a board route reaches its own handler even with a wrong bearer", async () => {
+      const { a } = appWithBoardStub();
+      const r = await request(a).post(`/api/approvals/${ID}/approve`).set("authorization", "Bearer nope");
+      expect(r.status).toBe(200);
+      expect(r.body.from).toBe("board-stub");
+    });
+    it("the four Hermes routes still 401 with no bearer", async () => {
+      const { a } = appWithBoardStub();
+      expect((await request(a).get(`/api/approvals/${ID}/tool-action`)).status).toBe(401);
+      expect((await request(a).post(`/api/approvals/${ID}/telegram-card`).send({ text: "c" })).status).toBe(401);
+      expect((await request(a).post(`/api/approvals/${ID}/auto-approve`).send({ ruleId: "r1" })).status).toBe(401);
+      expect((await request(a).post(`/api/approvals/${ID}/supersede`)).status).toBe(401);
+    });
+    it("the four Hermes routes still 401 with a wrong bearer", async () => {
+      const { a } = appWithBoardStub();
+      const wrong = { authorization: "Bearer nope" };
+      expect((await request(a).get(`/api/approvals/${ID}/tool-action`).set(wrong)).status).toBe(401);
+      expect((await request(a).post(`/api/approvals/${ID}/telegram-card`).set(wrong).send({ text: "c" })).status).toBe(401);
+      expect((await request(a).post(`/api/approvals/${ID}/auto-approve`).set(wrong).send({ ruleId: "r1" })).status).toBe(401);
+      expect((await request(a).post(`/api/approvals/${ID}/supersede`).set(wrong)).status).toBe(401);
+    });
+  });
+
+  // I2 regression: a race where the approval was already decided elsewhere must not settle the
+  // card as superseded.
+  it("supersede does not settle the card when the reject did not apply (already decided)", async () => {
+    const { a, deps } = app({ rejectApproval: vi.fn(async () => ({ applied: false })) });
+    const r = await request(a).post(`/api/approvals/${ID}/supersede`).set("authorization", `Bearer ${TOKEN}`);
+    expect(r.status).toBe(409);
+    expect(deps.cards.settle).not.toHaveBeenCalled();
+  });
+
+  // I3 regression: an actionable card must fail closed, not report 200, when signing/delivery
+  // isn't fully configured.
+  describe("I3: fail closed when cards aren't configured", () => {
+    it("buttons:true (default) returns 503 and never sends", async () => {
+      const { a, deps } = app({ cardsConfigured: false });
+      const r = await request(a).post(`/api/approvals/${ID}/telegram-card`).set("authorization", `Bearer ${TOKEN}`).send({ text: "card" });
+      expect(r.status).toBe(503);
+      expect(r.body.error).toBe("not_configured");
+      expect(deps.cards.send).not.toHaveBeenCalled();
+    });
+    it("buttons:false (an FYI card) still sends", async () => {
+      const { a, deps } = app({ cardsConfigured: false });
+      const r = await request(a).post(`/api/approvals/${ID}/telegram-card`).set("authorization", `Bearer ${TOKEN}`).send({ text: "fyi", buttons: false });
+      expect(r.status).toBe(200);
+      expect(deps.cards.send).toHaveBeenCalledWith(ID, { text: "fyi", parts: [] }, { buttons: false });
+    });
+  });
+
+  // Minor 4: tool-action is 409 for a non-open approval, and 500 "undecodable" instead of a 200
+  // with arguments: null, when the signed arguments fail to decode.
+  describe("minor 4: tool-action status handling", () => {
+    it("409 for a decided approval", async () => {
+      const { a } = app({ getApproval: vi.fn(async () => ({ id: ID, companyId: "co", status: "approved" })) });
+      const r = await request(a).get(`/api/approvals/${ID}/tool-action`).set("authorization", `Bearer ${TOKEN}`);
+      expect(r.status).toBe(409);
+    });
+    it("500 undecodable when the held action's arguments fail to decode", async () => {
+      const { a } = app({ toolAction: vi.fn(async () => ({ tool: "mail_send", arguments: null, expiresAt: null })) });
+      const r = await request(a).get(`/api/approvals/${ID}/tool-action`).set("authorization", `Bearer ${TOKEN}`);
+      expect(r.status).toBe(500);
+      expect(r.body.error).toBe("undecodable");
+    });
+  });
+
+  // Minor 9: a whitespace-only token is treated as unset (fail closed), not as a literal bearer
+  // value to match against.
+  it("treats a whitespace-only hermesToken as unset", async () => {
+    const { a } = app({ hermesToken: "   " });
+    const r = await request(a).get(`/api/approvals/${ID}/tool-action`).set("authorization", "Bearer    ");
+    expect(r.status).toBe(401);
   });
 });

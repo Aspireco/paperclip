@@ -1443,13 +1443,15 @@ export interface ChatChannelServiceOptions {
     capture(replyToMessageId: number, userId: string, text: string): Promise<boolean>;
   };
   /**
-   * Aspireco: the Hermes approval card store (Task 2). When a tapped button belongs to a card
-   * `cardApprovalId` decodes it to an approval id, and `cards.hasCard` confirms the card is still
-   * tracked, so the tap is settled with `cards.settle` (editMessageReplyMarkup) instead of
-   * `editMessageText` — a card's HTML formatting and expandable quote would otherwise be flattened.
+   * Aspireco: the Hermes approval card store (Task 2). When a tapped button belongs to a card,
+   * `cardApprovalId` decodes it to an approval id, and `cards.isCardMessage` confirms the
+   * *exact* tapped message is still the tracked card for that approval (not merely that the
+   * approval has one somewhere — a stale alert must never be mistaken for it), so the tap is
+   * settled with `cards.settle` (editMessageReplyMarkup) instead of `editMessageText` — a card's
+   * HTML formatting and expandable quote would otherwise be flattened.
    */
   cards?: {
-    hasCard(approvalId: string): boolean;
+    isCardMessage(approvalId: string, messageId: number): boolean;
     settle(approvalId: string, line: string): Promise<void>;
   };
   /** Decodes a Telegram approval button's action id to the approval id it signs, or null. */
@@ -3587,6 +3589,15 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       message?: { chat?: { id?: unknown } };
     };
     return query?.message?.chat?.id;
+  }
+
+  // Aspireco: the id of the tapped message itself, so a card settle can confirm it is the exact
+  // tracked card message for the approval, not just any message carrying that approval's buttons.
+  function telegramMessageIdFrom(raw: unknown): number | undefined {
+    const query = ((raw as { callback_query?: unknown })?.callback_query ?? raw) as {
+      message?: { message_id?: unknown };
+    };
+    return typeof query?.message?.message_id === "number" ? query.message.message_id : undefined;
   }
 
   // Aspireco: acknowledge an approval-button tap and replace the buttons with the outcome. When
@@ -20395,7 +20406,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       if (status !== null) {
         const line = typeof status === "string" ? status : status.status;
         const cardApprovalId = options.cardApprovalId?.(event.event.actionId) ?? null;
-        const onCard = cardApprovalId && options.cards?.hasCard(cardApprovalId)
+        const tappedMessageId = telegramMessageIdFrom(event.event.raw);
+        const onCard = cardApprovalId && tappedMessageId !== undefined
+            && options.cards?.isCardMessage(cardApprovalId, tappedMessageId)
           ? () => options.cards!.settle(cardApprovalId, line)
           : undefined;
         await settleTelegramApprovalButton(record.endpoint, event.event.raw, line, onCard);
