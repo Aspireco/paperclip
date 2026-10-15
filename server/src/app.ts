@@ -18,8 +18,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
-import { authUsers } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { authUsers, companyMemberships } from "@paperclipai/db";
+import { and, eq, ne } from "drizzle-orm";
 import {
   derivePaperclipViteHmrPort,
   type DeploymentExposure,
@@ -594,6 +594,18 @@ export async function createApp(
     userLabel: async (userId) => {
       const [user] = await db.select({ name: authUsers.name }).from(authUsers).where(eq(authUsers.id, userId)).limit(1);
       return user?.name?.trim() || null;
+    },
+    // A tap on another company's approval: the same rule chat-channels applies to the endpoint's
+    // company (active, non-viewer user membership), applied to the approval's own company.
+    isActiveDecider: async (userId, companyId) => {
+      const [row] = await db.select({ id: companyMemberships.id }).from(companyMemberships)
+        .where(and(
+          eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, userId), eq(companyMemberships.status, "active"),
+          ne(companyMemberships.membershipRole, "viewer"),
+        ))
+        .limit(1);
+      return Boolean(row);
     },
   });
   const chatChannels = chatChannelService(db, {

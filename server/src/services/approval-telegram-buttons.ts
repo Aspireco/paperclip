@@ -2,8 +2,9 @@
 // upstream's "tool side effects stay in Paperclip"). Safety: a tap only acts when it arrives through
 // Paperclip's verified Telegram webhook from a principal linked to an active non-viewer member
 // (chat-channels checks that before calling handle()), the button is HMAC-signed for exactly one
-// approval and decision, and the approval must belong to the endpoint's company. Deciding goes
-// through the same decideApproval() as the board's Approvals page.
+// approval and decision, and the approval must belong to the endpoint's company - or (2026-10-15)
+// to another company where the same user is an active, non-viewer member (isActiveDecider).
+// Deciding goes through the same decideApproval() as the board's Approvals page.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { telegramChatSdkCallbackData } from "./chat-interaction-publications.js";
 
@@ -74,6 +75,13 @@ export function approvalButtonHandler(deps: {
   getApproval: (id: string) => Promise<Approval | null>;
   decideApproval: (id: string, decision: Decision, userId: string) => Promise<DecideResult>;
   userLabel?: (userId: string) => Promise<string | null>;
+  /**
+   * Aspireco 2026-10-15: one bot (one endpoint, in one company) alerts for every company's approvals.
+   * chat-channels verifies the tapping user only for the endpoint's company, so an approval in another
+   * company is decided only when this confirms the same user is an active, non-viewer member there.
+   * Without it, other companies' approvals stay refused (the original behaviour).
+   */
+  isActiveDecider?: (userId: string, companyId: string) => Promise<boolean>;
 }) {
   return {
     /** null = not an approval button (let chat-channels handle it); otherwise the status line to show. */
@@ -81,7 +89,13 @@ export function approvalButtonHandler(deps: {
       const parsed = decodeApprovalAction(deps.secret, input.actionId);
       if (!parsed) return input.actionId.startsWith(PREFIX) ? "This button is not valid. Open Paperclip to decide." : null;
       const approval = await deps.getApproval(parsed.approvalId);
-      if (!approval || approval.companyId !== input.companyId) return "This approval is not available here.";
+      if (!approval) return "This approval is not available here.";
+      if (approval.companyId !== input.companyId) {
+        const allowed = deps.isActiveDecider
+          ? await deps.isActiveDecider(input.userId, approval.companyId).catch(() => false)
+          : false;
+        if (!allowed) return "This approval is not available here.";
+      }
       if (approval.status !== "pending" && approval.status !== "revision_requested") {
         return `Already decided: ${approval.status}.`;
       }
