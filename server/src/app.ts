@@ -638,6 +638,7 @@ export async function createApp(
             .then((r) => r.ok)
         : Promise.resolve(false),
   });
+  app.locals.approvalCards = approvalCardsStore;
   const chatChannels = chatChannelService(db, {
     approvalButtons: approvalButtonsHandler,
     cards: approvalCardsStore,

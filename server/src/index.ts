@@ -1324,6 +1324,9 @@ async function startServerWithDatabaseTeardown(
       botToken: process.env.PAPERCLIP_APPROVAL_TELEGRAM_BOT_TOKEN,
       chatId: process.env.PAPERCLIP_APPROVAL_TELEGRAM_CHAT_ID,
       publicBaseUrl: config.authPublicBaseUrl ?? null,
+      // Aspireco: Hermes sends a short card per approval first; only fall back to this plain
+      // alert if no card arrived within the grace window (default 10 minutes).
+      hasCard: (id: string) => app.locals.approvalCards?.hasCard(id) ?? false,
     });
     const decisionExecutor = decisionService(db as any, decisionServiceOptions);
     const retentionExecutor = decisionRetentionService(db as any, {

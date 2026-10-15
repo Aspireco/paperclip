@@ -18,6 +18,10 @@ type Options = {
   publicBaseUrl?: string | null;
   fetchImpl?: typeof fetch;
   now?: () => Date;
+  /** Hermes sends its own short card per approval (Task 2); skip the plain alert once one exists. */
+  hasCard?: (approvalId: string) => boolean;
+  /** How long to wait for a card before falling back to the plain alert. Default 10 minutes. */
+  cardGraceMs?: number;
 };
 
 function clip(text: unknown, max: number): string {
@@ -107,6 +111,7 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
           payload: approvals.payload,
           companyName: companies.name,
           issuePrefix: companies.issuePrefix,
+          createdAt: approvals.createdAt,
         })
         .from(approvals)
         .innerJoin(companies, eq(companies.id, approvals.companyId))
@@ -116,6 +121,14 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
 
       for (const row of fresh) {
         if (notified.has(row.id) || sent >= MAX_PER_SWEEP) continue;
+        // A Hermes card already covers this approval; never double-alert it.
+        if (options.hasCard?.(row.id)) {
+          notified.add(row.id);
+          continue;
+        }
+        // No card yet: give Hermes a grace window before falling back to the plain alert.
+        const graceMs = options.cardGraceMs ?? 600_000;
+        if (options.hasCard && now().getTime() - new Date(row.createdAt).getTime() < graceMs) continue;
         const ok = await send(approvalTelegramMessage({
           approvalId: row.id,
           companyName: row.companyName,

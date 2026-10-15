@@ -1,7 +1,7 @@
 // Aspireco: approval alerts on Telegram.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { approvals, companies, createDb } from "@paperclipai/db";
+import { approvals, companies, createDb, type Db } from "@paperclipai/db";
 import { approvalTelegramMessage, approvalTelegramNotifier } from "../services/approval-telegram-notifier.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -141,6 +141,65 @@ describeDb("approvalTelegramNotifier", () => {
     expect(telegram.sent).toHaveLength(1);
     expect(telegram.sent[0].body).not.toHaveProperty("reply_markup");
     expect(telegram.sent[0].body.text).toContain("Endpoint down");
+  });
+
+  function setupCardAwareNotifier({ createdMinutesAgo, hasCard }: { createdMinutesAgo: number; hasCard: () => boolean }) {
+    const fixedNow = new Date("2026-01-01T00:00:00.000Z");
+    const row = {
+      id: "ap-1",
+      payload: { title: "Test approval" },
+      companyName: "Aspireco",
+      issuePrefix: "ASP",
+      createdAt: new Date(fixedNow.getTime() - createdMinutesAgo * 60_000),
+    };
+    let selectCalls = 0;
+    const chain = (result: unknown) => {
+      const link: any = {
+        from: () => link,
+        innerJoin: () => link,
+        where: () => link,
+        orderBy: () => link,
+        limit: () => link,
+        then: (resolve: (value: unknown) => void, reject?: (err: unknown) => void) =>
+          Promise.resolve(result).then(resolve, reject),
+      };
+      return link;
+    };
+    const fakeDb = {
+      select: () => {
+        selectCalls += 1;
+        // First select() in a sweep is the restart catch-up query; keep it empty so it never fires.
+        return selectCalls === 1 ? chain([]) : chain([row]);
+      },
+    } as unknown as Db;
+    const telegram = fakeTelegram();
+    const notifier = approvalTelegramNotifier(fakeDb, {
+      botToken: "123:abc",
+      chatId: "1",
+      fetchImpl: telegram.fetchImpl,
+      now: () => fixedNow,
+      hasCard,
+      cardGraceMs: 600_000,
+    });
+    return { notifier, sent: telegram.sent };
+  }
+
+  it("holds a fresh approval for 10 minutes waiting for a Hermes card", async () => {
+    const { notifier, sent } = setupCardAwareNotifier({ createdMinutesAgo: 5, hasCard: () => false });
+    await notifier.sweep();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("fallback after 10 minutes: no card -> the plain alert with buttons", async () => {
+    const { notifier, sent } = setupCardAwareNotifier({ createdMinutesAgo: 11, hasCard: () => false });
+    await notifier.sweep();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("never alerts an approval that already has a card", async () => {
+    const { notifier, sent } = setupCardAwareNotifier({ createdMinutesAgo: 30, hasCard: () => true });
+    await notifier.sweep();
+    expect(sent).toHaveLength(0);
   });
 
   it("a failed send is retried on the next sweep, not dropped", async () => {
