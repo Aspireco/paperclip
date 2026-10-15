@@ -1443,6 +1443,18 @@ export interface ChatChannelServiceOptions {
     capture(replyToMessageId: number, userId: string, text: string): Promise<boolean>;
   };
   /**
+   * Aspireco: the Hermes approval card store (Task 2). When a tapped button belongs to a card
+   * `cardApprovalId` decodes it to an approval id, and `cards.hasCard` confirms the card is still
+   * tracked, so the tap is settled with `cards.settle` (editMessageReplyMarkup) instead of
+   * `editMessageText` — a card's HTML formatting and expandable quote would otherwise be flattened.
+   */
+  cards?: {
+    hasCard(approvalId: string): boolean;
+    settle(approvalId: string, line: string): Promise<void>;
+  };
+  /** Decodes a Telegram approval button's action id to the approval id it signs, or null. */
+  cardApprovalId?: (actionId: string) => string | null;
+  /**
    * Provider webhooks await only the durable ingress write, then finish task
    * processing outside the provider response budget. Tests may leave this off
    * when they need direct callback assertions.
@@ -3577,8 +3589,17 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     return query?.message?.chat?.id;
   }
 
-  // Aspireco: acknowledge an approval-button tap and replace the buttons with the outcome.
-  async function settleTelegramApprovalButton(endpoint: EndpointRow, raw: unknown, status: string) {
+  // Aspireco: acknowledge an approval-button tap and replace the buttons with the outcome. When
+  // the tapped message is a Hermes card, `onCard` does the edit instead (editMessageReplyMarkup,
+  // via approvalCards.settle) so the card's HTML formatting and expandable quote survive — the
+  // default editMessageText below would flatten both. The callback is still answered either way,
+  // so Telegram clears the tap's loading state.
+  async function settleTelegramApprovalButton(
+    endpoint: EndpointRow,
+    raw: unknown,
+    status: string,
+    onCard?: () => Promise<void>,
+  ) {
     const query = ((raw as { callback_query?: unknown })?.callback_query ?? raw) as {
       id?: unknown;
       message?: { chat?: { id?: unknown }; message_id?: unknown; text?: unknown };
@@ -3596,6 +3617,10 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         }).catch(() => null);
       if (typeof query?.id === "string") {
         await call("answerCallbackQuery", { callback_query_id: query.id, text: status.slice(0, 190) });
+      }
+      if (onCard) {
+        await onCard();
+        return;
       }
       const chatId = query?.message?.chat?.id;
       const messageId = query?.message?.message_id;
@@ -3636,6 +3661,32 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     const payload = (await response.json().catch(() => null)) as { result?: { message_id?: unknown } } | null;
     const messageId = payload?.result?.message_id;
     return { ok: true, messageId: typeof messageId === "number" ? messageId : undefined };
+  }
+
+  // Aspireco: edit a card's keyboard without touching its text, so the HTML formatting and
+  // expandable quote an approval card was sent with survive settling (editMessageText would
+  // flatten it). Same shape as sendTelegramMessage.
+  async function editTelegramReplyMarkup(
+    endpointId: string,
+    chatId: unknown,
+    messageId: number,
+    keyboard: unknown,
+  ): Promise<{ ok: boolean }> {
+    const record = await endpointRecord(endpointId);
+    if (!record || record.endpoint.provider !== "telegram" || record.endpoint.status !== "active") return { ok: false };
+    const credentials = await resolveCredentials(record.endpoint);
+    if (!credentials.botToken) return { ok: false };
+    const response = await fetchImpl(
+      `https://api.telegram.org/bot${encodeURIComponent(credentials.botToken)}/editMessageReplyMarkup`,
+      {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: keyboard }),
+      },
+    ).catch(() => null);
+    return { ok: Boolean(response?.ok) };
   }
 
   async function endpointRecord(endpointId: string) {
@@ -20343,7 +20394,11 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       });
       if (status !== null) {
         const line = typeof status === "string" ? status : status.status;
-        await settleTelegramApprovalButton(record.endpoint, event.event.raw, line);
+        const cardApprovalId = options.cardApprovalId?.(event.event.actionId) ?? null;
+        const onCard = cardApprovalId && options.cards?.hasCard(cardApprovalId)
+          ? () => options.cards!.settle(cardApprovalId, line)
+          : undefined;
+        await settleTelegramApprovalButton(record.endpoint, event.event.raw, line, onCard);
         if (typeof status !== "string") {
           const chatId = telegramChatIdFrom(event.event.raw);
           const sent = await sendTelegramMessage(record.endpoint.id, {
@@ -38512,6 +38567,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     listPrincipals,
     createLinkIntent,
     sendTelegramMessage,
+    editTelegramReplyMarkup,
     previewIdentityLink,
     requestIdentityAccess,
     confirmIdentityLink,

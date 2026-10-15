@@ -1,4 +1,8 @@
-import { approvalButtonHandler, CHANGE_PROMPT_TEXT } from "./services/approval-telegram-buttons.js";
+import { approvalButtonHandler, CHANGE_PROMPT_TEXT, decodeApprovalAction } from "./services/approval-telegram-buttons.js";
+import { approvalCards } from "./services/approval-telegram-cards.js";
+import { approvalCardRoutes } from "./routes/approval-cards.js";
+import { readSignedToolArguments } from "./services/tool-content-guards.js";
+import { telegramChatSdkCallbackData } from "./services/chat-interaction-publications.js";
 import { accessService } from "./services/access.js";
 import { browserUseRoutes } from "./routes/browser-use.js";
 import { browserUseService } from "./services/browser-use.js";
@@ -19,7 +23,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
-import { authUsers } from "@paperclipai/db";
+import { authUsers, toolActionRequests, toolInvocations } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import {
   derivePaperclipViteHmrPort,
@@ -605,8 +609,33 @@ export async function createApp(
       return user?.name?.trim() || null;
     },
   });
+  // Aspireco: Hermes builds each approval card's text; this endpoint and secret are the same ones
+  // the plain alert's buttons already sign with, so a tap on either kind of message decodes the
+  // same way. `cards.send`/`edit` are only ever called on a request, after `chatChannels` below is
+  // assigned, so the forward reference to it here is safe (same late-binding as `approvalsRouter`).
+  const approvalCardsSecret = process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET ?? "";
+  const approvalCardsChatId = process.env.PAPERCLIP_APPROVAL_TELEGRAM_CHAT_ID ?? "";
+  const approvalCardsEndpointId = process.env.PAPERCLIP_APPROVAL_TELEGRAM_ENDPOINT_ID?.trim() || null;
+  const approvalCardsStore = approvalCards({
+    secret: approvalCardsSecret,
+    chatId: approvalCardsChatId,
+    send: (body) =>
+      approvalCardsEndpointId
+        ? chatChannels.sendTelegramMessage(approvalCardsEndpointId, body)
+        : Promise.resolve({ ok: false }),
+    edit: (messageId, line) =>
+      approvalCardsEndpointId
+        ? chatChannels
+            .editTelegramReplyMarkup(approvalCardsEndpointId, approvalCardsChatId, messageId, {
+              inline_keyboard: [[{ text: line, callback_data: telegramChatSdkCallbackData("pa-noop") }]],
+            })
+            .then((r) => r.ok)
+        : Promise.resolve(false),
+  });
   const chatChannels = chatChannelService(db, {
     approvalButtons: approvalButtonsHandler,
+    cards: approvalCardsStore,
+    cardApprovalId: (actionId) => decodeApprovalAction(approvalCardsSecret, actionId)?.approvalId ?? null,
     deferWebhookProcessing: true,
     heartbeat: connectionIntentHeartbeat,
     publicBaseUrl: opts.authPublicBaseUrl,
@@ -803,6 +832,46 @@ export async function createApp(
     },
   });
   api.use(approvalsRouter);
+  // Aspireco: Hermes-only routes (its own bearer, never an agent key or a board session) for the
+  // card, the held tool action it describes, auto-approval and supersession. Mounted on `app`
+  // directly, ahead of `app.use("/api", api)` below, so they run before the board mutation guard
+  // the `api` router applies to everything else under `/api` — the routes carry their own check.
+  async function approvalCardToolAction(approvalId: string) {
+    const [held] = await db
+      .select({
+        invocationId: toolActionRequests.invocationId,
+        signedArguments: toolActionRequests.signedArguments,
+        expiresAt: toolActionRequests.expiresAt,
+        toolName: toolInvocations.toolName,
+      })
+      .from(toolActionRequests)
+      .innerJoin(toolInvocations, eq(toolInvocations.id, toolActionRequests.invocationId))
+      .where(eq(toolActionRequests.approvalId, approvalId))
+      .limit(1);
+    if (!held) return null;
+    return {
+      tool: held.toolName,
+      arguments: readSignedToolArguments({
+        signedArguments: held.signedArguments,
+        invocationId: held.invocationId,
+        toolName: held.toolName,
+        signingSecret: process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET,
+      }),
+      expiresAt: held.expiresAt ? held.expiresAt.toISOString() : null,
+    };
+  }
+  app.use(
+    "/api",
+    approvalCardRoutes({
+      hermesToken: process.env.PAPERCLIP_HERMES_TOKEN,
+      getApproval: (id) => approvalsRouter.getApproval(id),
+      toolAction: approvalCardToolAction,
+      cards: approvalCardsStore,
+      decideApproval: (id, decision, userId, note) =>
+        approvalsRouter.decideApproval(id, decision, userId, note),
+      rejectApproval: (id, note) => approvalsRouter.decideApproval(id, "reject", "auto-approver", note),
+    }),
+  );
   api.use(secretRoutes(db));
   api.use(managedAgentProfileRoutes(db));
   api.use(remoteAgentProfileRoutes(db));
