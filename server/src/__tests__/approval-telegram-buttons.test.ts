@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   approvalButtonHandler,
   approvalButtons,
+  CHANGE_PROMPT_TEXT,
   decodeApprovalAction,
   encodeApprovalAction,
 } from "../services/approval-telegram-buttons.js";
@@ -38,6 +39,12 @@ describe("approval button encoding", () => {
 
   it("ignores ordinary chat actions", () => {
     expect(decodeApprovalAction(SECRET, "confirm:abc")).toBeNull();
+  });
+
+  it("rewriting a signed Change button's flag to Approve fails verification", () => {
+    const change = encodeApprovalAction(SECRET, "change", ID);
+    const rewritten = "pay" + change.slice(3);
+    expect(decodeApprovalAction(SECRET, rewritten)).toBeNull();
   });
 });
 
@@ -108,32 +115,83 @@ describe("cross-company and change", () => {
   const HQ = "a62c615c-51b6-4bb0-b03f-78e61c919919";
   const pending = { id: ID, companyId: NORPEX, status: "pending" };
 
-  function handler(member: boolean) {
-    return approvalButtonHandler({
+  function handler(member: boolean, status: string = "pending") {
+    const approval = { ...pending, status };
+    const decideApproval = vi.fn(async () => ({ outcome: "decided" as const, approval: { ...approval, status: "approved" }, applied: true }));
+    const requestChange = vi.fn(async () => ({ promptText: "What should change? Reply to this message." }));
+    const h = approvalButtonHandler({
       secret: SECRET,
-      getApproval: async () => pending,
+      getApproval: async () => approval,
       isActiveMember: vi.fn(async (_u: string, c: string) => member && c === NORPEX),
-      decideApproval: vi.fn(async () => ({ outcome: "decided" as const, approval: { ...pending, status: "approved" }, applied: true })),
-      requestChange: vi.fn(async () => ({ promptText: "What should change? Reply to this message." })),
+      decideApproval,
+      requestChange,
     });
+    return { h, decideApproval, requestChange };
   }
 
   it("decides a Norpex approval tapped through the HQ endpoint when the user is a Norpex member", async () => {
-    const h = handler(true);
+    const { h } = handler(true);
     const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "u1", companyId: HQ });
     expect(out).toBe("✅ Approved");
   });
 
   it("non-member: refuses and decides nothing", async () => {
-    const h = handler(false);
+    const { h } = handler(false);
     const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "u1", companyId: HQ });
     expect(out).toBe("This approval is not available here.");
   });
 
   it("change: asks what should change with a force-reply prompt", async () => {
-    const h = handler(true);
+    const { h, decideApproval, requestChange } = handler(true);
     const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "change", ID), userId: "u1", companyId: HQ });
     expect(out).toEqual({ status: "✏️ Changes requested", forceReply: "What should change? Reply to this message.", approvalId: ID });
+    expect(decideApproval).not.toHaveBeenCalled();
+    expect(requestChange).toHaveBeenCalledWith(ID, "u1");
+  });
+
+  it("change on an approval already revision_requested: does not call requestChange, resends the prompt", async () => {
+    const { h, requestChange } = handler(true, "revision_requested");
+    const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "change", ID), userId: "u1", companyId: HQ });
+    expect(out).toEqual({ status: "✏️ Changes requested", forceReply: CHANGE_PROMPT_TEXT, approvalId: ID });
+    expect(requestChange).not.toHaveBeenCalled();
+  });
+
+  it("requestChange throwing (a decision race) returns a defined string instead of throwing out of handle()", async () => {
+    const approval = { ...pending, status: "pending" };
+    const getApproval = vi
+      .fn()
+      .mockResolvedValueOnce(approval)
+      .mockResolvedValueOnce({ ...approval, status: "approved" });
+    const h = approvalButtonHandler({
+      secret: SECRET,
+      getApproval,
+      isActiveMember: async () => true,
+      decideApproval: vi.fn(),
+      requestChange: vi.fn(async () => {
+        throw new Error("unprocessable: only pending approvals can request revision");
+      }),
+    });
+    const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "change", ID), userId: "u1", companyId: HQ });
+    expect(out).toBe("Already decided: approved.");
+  });
+
+  it("requestChange throwing when the approval can't be re-read still returns a defined string", async () => {
+    const approval = { ...pending, status: "pending" };
+    const getApproval = vi
+      .fn()
+      .mockResolvedValueOnce(approval)
+      .mockRejectedValueOnce(new Error("db unavailable"));
+    const h = approvalButtonHandler({
+      secret: SECRET,
+      getApproval,
+      isActiveMember: async () => true,
+      decideApproval: vi.fn(),
+      requestChange: vi.fn(async () => {
+        throw new Error("race");
+      }),
+    });
+    const out = await h.handle({ actionId: encodeApprovalAction(SECRET, "change", ID), userId: "u1", companyId: HQ });
+    expect(out).toBe("Could not request changes. Open Paperclip.");
   });
 
   it("has three buttons, each within 64 bytes", () => {

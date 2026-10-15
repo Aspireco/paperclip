@@ -20345,13 +20345,18 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         const line = typeof status === "string" ? status : status.status;
         await settleTelegramApprovalButton(record.endpoint, event.event.raw, line);
         if (typeof status !== "string") {
+          const chatId = telegramChatIdFrom(event.event.raw);
           const sent = await sendTelegramMessage(record.endpoint.id, {
-            chat_id: telegramChatIdFrom(event.event.raw),
+            chat_id: chatId,
             text: status.forceReply,
             reply_markup: { force_reply: true, input_field_placeholder: "What should change?" },
           });
           if (sent.ok && sent.messageId !== undefined) {
             options.changePrompts?.remember(sent.messageId, status.approvalId, principal.userId);
+          } else if (chatId === undefined) {
+            logger.warn({ endpointId: record.endpoint.id, approvalId: status.approvalId }, "approval button: could not read the Telegram chat id for the Change force-reply prompt");
+          } else if (!sent.ok) {
+            logger.warn({ endpointId: record.endpoint.id, approvalId: status.approvalId }, "approval button: could not send the Change force-reply prompt");
           }
         }
         return;

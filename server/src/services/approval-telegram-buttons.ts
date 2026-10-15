@@ -8,6 +8,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { telegramChatSdkCallbackData } from "./chat-interaction-publications.js";
 
+/** Aspireco: the fixed Change-button prompt, shared with app.ts's requestChange and reused verbatim
+ * for a repeat tap on an approval already in revision_requested (see approvalButtonHandler). */
+export const CHANGE_PROMPT_TEXT = "What should change? Reply to this message.";
+
 type Decision = "approve" | "reject" | "change";
 const FLAG: Record<Decision, string> = { approve: "y", reject: "n", change: "c" };
 const FROM_FLAG: Record<string, Decision> = { y: "approve", n: "reject", c: "change" };
@@ -96,8 +100,20 @@ export function approvalButtonHandler(deps: {
         return `Already decided: ${approval.status}.`;
       }
       if (parsed.decision === "change") {
-        const { promptText } = await deps.requestChange(parsed.approvalId, input.userId);
-        return { status: "✏️ Changes requested", forceReply: promptText, approvalId: parsed.approvalId };
+        // A second Change tap (or a stale card) lands here with the approval already
+        // revision_requested: svc.requestRevision only accepts pending, so calling it again would
+        // throw instead of settling the button. Idempotent: resend the same prompt without deciding
+        // anything new.
+        if (approval.status === "revision_requested") {
+          return { status: "✏️ Changes requested", forceReply: CHANGE_PROMPT_TEXT, approvalId: parsed.approvalId };
+        }
+        try {
+          const { promptText } = await deps.requestChange(parsed.approvalId, input.userId);
+          return { status: "✏️ Changes requested", forceReply: promptText, approvalId: parsed.approvalId };
+        } catch {
+          const latest = await deps.getApproval(parsed.approvalId).catch(() => null);
+          return latest ? `Already decided: ${latest.status}.` : "Could not request changes. Open Paperclip.";
+        }
       }
       const result = await deps.decideApproval(parsed.approvalId, parsed.decision, input.userId);
       if (result.outcome === "expired") return "Expired before a decision. Nothing was run.";

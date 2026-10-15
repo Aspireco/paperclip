@@ -1,4 +1,4 @@
-import { approvalButtonHandler } from "./services/approval-telegram-buttons.js";
+import { approvalButtonHandler, CHANGE_PROMPT_TEXT } from "./services/approval-telegram-buttons.js";
 import { accessService } from "./services/access.js";
 import { browserUseRoutes } from "./routes/browser-use.js";
 import { browserUseService } from "./services/browser-use.js";
@@ -598,7 +598,7 @@ export async function createApp(
     decideApproval: (id, decision, userId) => approvalsRouter.decideApproval(id, decision, userId),
     requestChange: async (approvalId, userId) => {
       await approvalsRouter.requestRevision(approvalId, userId, "John asked for changes (Telegram). His note follows as a comment.");
-      return { promptText: "What should change? Reply to this message." };
+      return { promptText: CHANGE_PROMPT_TEXT };
     },
     userLabel: async (userId) => {
       const [user] = await db.select({ name: authUsers.name }).from(authUsers).where(eq(authUsers.id, userId)).limit(1);
