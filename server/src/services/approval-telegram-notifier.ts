@@ -126,7 +126,9 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
           notified.add(row.id);
           continue;
         }
-        // No card yet: give Hermes a grace window before falling back to the plain alert.
+        // No card yet: give Hermes a grace window before falling back to the plain alert. Age is
+        // measured with this process's own clock against the DB's createdAt, so clock skew only
+        // shifts when the fallback fires - it never suppresses it.
         const graceMs = options.cardGraceMs ?? 600_000;
         if (options.hasCard && now().getTime() - new Date(row.createdAt).getTime() < graceMs) continue;
         const ok = await send(approvalTelegramMessage({

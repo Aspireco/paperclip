@@ -1,7 +1,7 @@
 // Aspireco: approval alerts on Telegram.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { approvals, companies, createDb, type Db } from "@paperclipai/db";
+import { approvals, companies, createDb } from "@paperclipai/db";
 import { approvalTelegramMessage, approvalTelegramNotifier } from "../services/approval-telegram-notifier.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -143,62 +143,61 @@ describeDb("approvalTelegramNotifier", () => {
     expect(telegram.sent[0].body.text).toContain("Endpoint down");
   });
 
-  function setupCardAwareNotifier({ createdMinutesAgo, hasCard }: { createdMinutesAgo: number; hasCard: () => boolean }) {
-    const fixedNow = new Date("2026-01-01T00:00:00.000Z");
-    const row = {
-      id: "ap-1",
-      payload: { title: "Test approval" },
-      companyName: "Aspireco",
-      issuePrefix: "ASP",
-      createdAt: new Date(fixedNow.getTime() - createdMinutesAgo * 60_000),
-    };
-    let selectCalls = 0;
-    const chain = (result: unknown) => {
-      const link: any = {
-        from: () => link,
-        innerJoin: () => link,
-        where: () => link,
-        orderBy: () => link,
-        limit: () => link,
-        then: (resolve: (value: unknown) => void, reject?: (err: unknown) => void) =>
-          Promise.resolve(result).then(resolve, reject),
-      };
-      return link;
-    };
-    const fakeDb = {
-      select: () => {
-        selectCalls += 1;
-        // First select() in a sweep is the restart catch-up query; keep it empty so it never fires.
-        return selectCalls === 1 ? chain([]) : chain([row]);
-      },
-    } as unknown as Db;
+  // Real embedded-Postgres db + real gte/lt SQL filters (same fixtures as the rest of this file),
+  // with an advancing fake clock so the grace-window math can be driven deterministically: the
+  // notifier is built at t0 (that becomes its `startedAt`), the approval is inserted with a
+  // createdAt just after t0 (so it passes `gte(createdAt, startedAt)` and counts as "fresh"
+  // rather than falling into the restart catch-up query), then `clock` is advanced before the
+  // sweep that is actually asserted on.
+  function setupCardAwareNotifier(hasCard: () => boolean) {
+    const t0 = new Date();
+    let clock = t0;
     const telegram = fakeTelegram();
-    const notifier = approvalTelegramNotifier(fakeDb, {
+    const notifier = approvalTelegramNotifier(db, {
       botToken: "123:abc",
       chatId: "1",
       fetchImpl: telegram.fetchImpl,
-      now: () => fixedNow,
+      now: () => clock,
       hasCard,
       cardGraceMs: 600_000,
     });
-    return { notifier, sent: telegram.sent };
+    return {
+      notifier,
+      sent: telegram.sent,
+      t0,
+      advanceMinutes: (minutes: number) => {
+        clock = new Date(t0.getTime() + minutes * 60_000);
+      },
+    };
   }
 
   it("holds a fresh approval for 10 minutes waiting for a Hermes card", async () => {
-    const { notifier, sent } = setupCardAwareNotifier({ createdMinutesAgo: 5, hasCard: () => false });
-    await notifier.sweep();
+    await company();
+    const { notifier, sent, t0, advanceMinutes } = setupCardAwareNotifier(() => false);
+    await notifier.sweep(); // flushes the restart catch-up query (nothing waiting yet)
+    await approval("Needs a card", "pending", new Date(t0.getTime() + 1_000));
+    advanceMinutes(5);
+    expect(await notifier.sweep()).toEqual({ sent: 0 });
     expect(sent).toHaveLength(0);
   });
 
   it("fallback after 10 minutes: no card -> the plain alert with buttons", async () => {
-    const { notifier, sent } = setupCardAwareNotifier({ createdMinutesAgo: 11, hasCard: () => false });
+    await company();
+    const { notifier, sent, t0, advanceMinutes } = setupCardAwareNotifier(() => false);
     await notifier.sweep();
+    await approval("Still no card", "pending", new Date(t0.getTime() + 1_000));
+    advanceMinutes(11);
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
     expect(sent).toHaveLength(1);
   });
 
   it("never alerts an approval that already has a card", async () => {
-    const { notifier, sent } = setupCardAwareNotifier({ createdMinutesAgo: 30, hasCard: () => true });
+    await company();
+    const { notifier, sent, t0, advanceMinutes } = setupCardAwareNotifier(() => true);
     await notifier.sweep();
+    await approval("Has a card", "pending", new Date(t0.getTime() + 1_000));
+    advanceMinutes(30);
+    expect(await notifier.sweep()).toEqual({ sent: 0 });
     expect(sent).toHaveLength(0);
   });
 
