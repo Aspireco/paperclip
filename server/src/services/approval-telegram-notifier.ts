@@ -22,7 +22,26 @@ type Options = {
   hasCard?: (approvalId: string) => boolean;
   /** How long to wait for a card before falling back to the plain alert. Default 10 minutes. */
   cardGraceMs?: number;
+  /** The `companyId:tool` pairs Hermes cards (PAPERCLIP_CARDED_TOOLS, see parseCardedTools). Only
+   * these wait out the card grace; every other approval alerts at once. Empty or unset: no grace. */
+  cardedTools?: ReadonlySet<string> | null;
 };
+
+/** Aspireco: PAPERCLIP_CARDED_TOOLS, comma-separated `companyId:tool`, into the set of approvals
+ * Hermes sends a card for. Blank or malformed entries are ignored. */
+export function parseCardedTools(raw: string | null | undefined): Set<string> {
+  const pairs = new Set<string>();
+  for (const entry of (raw ?? "").split(",")) {
+    const at = entry.indexOf(":");
+    const companyId = entry.slice(0, at).trim().toLowerCase();
+    const tool = entry.slice(at + 1).trim();
+    if (at > 0 && companyId && tool) pairs.add(`${companyId}:${tool}`);
+  }
+  return pairs;
+}
+
+/** The fallback alert's extra line for an approval that should have had a card. */
+export const CARD_MISSED_LINE = "The full card didn't arrive — open the board to see what you're approving.";
 
 function clip(text: unknown, max: number): string {
   const value = typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
@@ -35,6 +54,8 @@ export function approvalTelegramMessage(input: {
   issuePrefix: string;
   payload: unknown;
   publicBaseUrl: string | null;
+  /** This approval should have had a Hermes card and none came: say so, so it isn't approved blind. */
+  cardMissed?: boolean;
 }): string {
   const payload = (input.payload ?? {}) as Record<string, unknown>;
   const title = clip(payload.title, 160) || "An approval is waiting";
@@ -42,7 +63,13 @@ export function approvalTelegramMessage(input: {
   const link = input.publicBaseUrl
     ? `${input.publicBaseUrl.replace(/\/+$/, "")}/${input.issuePrefix}/approvals/${input.approvalId}`
     : null;
-  return [`Approval needed - ${input.companyName}`, title, summary, link ? `Open: ${link}` : ""]
+  return [
+    `Approval needed - ${input.companyName}`,
+    title,
+    summary,
+    input.cardMissed ? CARD_MISSED_LINE : "",
+    link ? `Open: ${link}` : "",
+  ]
     .filter(Boolean)
     .join("\n");
 }
@@ -60,6 +87,12 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
   const startedAt = now();
   const notified = new Set<string>();
   let catchUpDone = withButtons;
+  const cardedTools = options.cardedTools ?? null;
+
+  function isCarded(companyId: string, payload: unknown): boolean {
+    const tool = (payload as { tool?: unknown } | null)?.tool;
+    return Boolean(cardedTools?.size && typeof tool === "string" && cardedTools.has(`${companyId.toLowerCase()}:${tool}`));
+  }
 
   async function send(text: string, approvalId?: string): Promise<boolean> {
     const markup = approvalId && viaEndpoint ? options.buttonsFor?.(approvalId) ?? null : null;
@@ -111,6 +144,7 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
       const fresh = await db
         .select({
           id: approvals.id,
+          companyId: approvals.companyId,
           payload: approvals.payload,
           companyName: companies.name,
           issuePrefix: companies.issuePrefix,
@@ -129,17 +163,20 @@ export function approvalTelegramNotifier(db: Db, options: Options = {}) {
           notified.add(row.id);
           continue;
         }
-        // No card yet: give Hermes a grace window before falling back to the plain alert. Age is
-        // measured with this process's own clock against the DB's createdAt, so clock skew only
-        // shifts when the fallback fires - it never suppresses it.
+        // No card yet: if Hermes cards this company's tool, give it a grace window before falling
+        // back to the plain alert; anything Hermes doesn't card alerts at once. Age is measured
+        // with this process's own clock against the DB's createdAt, so clock skew only shifts when
+        // the fallback fires - it never suppresses it.
+        const carded = Boolean(options.hasCard) && isCarded(row.companyId, row.payload);
         const graceMs = options.cardGraceMs ?? 600_000;
-        if (options.hasCard && now().getTime() - new Date(row.createdAt).getTime() < graceMs) continue;
+        if (carded && now().getTime() - new Date(row.createdAt).getTime() < graceMs) continue;
         const ok = await send(approvalTelegramMessage({
           approvalId: row.id,
           companyName: row.companyName,
           issuePrefix: row.issuePrefix,
           payload: row.payload,
           publicBaseUrl: options.publicBaseUrl ?? null,
+          cardMissed: carded,
         }), row.id);
         if (ok) {
           notified.add(row.id);

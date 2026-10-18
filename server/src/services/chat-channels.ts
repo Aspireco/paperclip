@@ -1436,7 +1436,7 @@ export interface ChatChannelServiceOptions {
   approvalButtons?: {
     handle(
       input: { actionId: string; userId: string; companyId: string },
-    ): Promise<string | { status: string; forceReply: string; approvalId: string } | null>;
+    ): Promise<string | { status: string; forceReply: string; approvalId: string } | { answerOnly: true } | null>;
   };
   /**
    * Aspireco: remembers a Change force-reply prompt so chat-channels can match John's next reply
@@ -3614,6 +3614,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     raw: unknown,
     status: string,
     onCard?: () => Promise<void>,
+    answerOnly = false,
   ) {
     const query = ((raw as { callback_query?: unknown })?.callback_query ?? raw) as {
       id?: unknown;
@@ -3631,8 +3632,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           body: JSON.stringify(body),
         }).catch(() => null);
       if (typeof query?.id === "string") {
-        await call("answerCallbackQuery", { callback_query_id: query.id, text: status.slice(0, 190) });
+        await call("answerCallbackQuery", {
+          callback_query_id: query.id,
+          ...(status ? { text: status.slice(0, 190) } : {}),
+        });
       }
+      // A settled card's outcome label: clear the tap's loading state, change nothing.
+      if (answerOnly) return;
       if (onCard) {
         await onCard();
         return;
@@ -20472,6 +20478,10 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         userId: principal.userId,
         companyId: record.endpoint.companyId,
       });
+      if (status !== null && typeof status !== "string" && "answerOnly" in status) {
+        await settleTelegramApprovalButton(record.endpoint, event.event.raw, "", undefined, true);
+        return;
+      }
       if (status !== null) {
         const line = typeof status === "string" ? status : status.status;
         const cardApprovalId = options.cardApprovalId?.(event.event.actionId) ?? null;

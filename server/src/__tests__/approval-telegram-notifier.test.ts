@@ -2,7 +2,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { approvals, companies, createDb } from "@paperclipai/db";
-import { approvalTelegramMessage, approvalTelegramNotifier } from "../services/approval-telegram-notifier.js";
+import {
+  approvalTelegramMessage,
+  approvalTelegramNotifier,
+  CARD_MISSED_LINE,
+  parseCardedTools,
+} from "../services/approval-telegram-notifier.js";
 import { approvalButtons } from "../services/approval-telegram-buttons.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -33,6 +38,39 @@ describe("approvalTelegramMessage", () => {
     expect(lines[2].length).toBe(300);
     expect(lines[3]).toBe("Open: https://hq.example/ASP/approvals/ap-1");
   });
+
+  it("a carded approval's fallback says the card didn't arrive, before the link", () => {
+    const text = approvalTelegramMessage({
+      approvalId: "ap-1",
+      companyName: "Norpex",
+      issuePrefix: "NOR",
+      payload: { title: "Approve high-risk tool action: mail_send" },
+      publicBaseUrl: "https://hq.example",
+      cardMissed: true,
+    });
+    expect(text.split("\n")).toEqual([
+      "Approval needed - Norpex",
+      "Approve high-risk tool action: mail_send",
+      "The full card didn't arrive — open the board to see what you're approving.",
+      "Open: https://hq.example/NOR/approvals/ap-1",
+    ]);
+  });
+});
+
+describe("parseCardedTools", () => {
+  it("reads comma-separated companyId:tool pairs, trimming and lowercasing the company id", () => {
+    expect(parseCardedTools(" C09EF533-845c-4bad-a3fe-46ccc53ada7c:mail_send , c09ef533-845c-4bad-a3fe-46ccc53ada7c:norpex_apply,"))
+      .toEqual(new Set([
+        "c09ef533-845c-4bad-a3fe-46ccc53ada7c:mail_send",
+        "c09ef533-845c-4bad-a3fe-46ccc53ada7c:norpex_apply",
+      ]));
+  });
+
+  it("unset, blank or malformed: no pairs", () => {
+    expect(parseCardedTools(undefined).size).toBe(0);
+    expect(parseCardedTools("  ").size).toBe(0);
+    expect(parseCardedTools("mail_send,:mail_send,co-1:").size).toBe(0);
+  });
 });
 
 describeDb("approvalTelegramNotifier", () => {
@@ -60,9 +98,9 @@ describeDb("approvalTelegramNotifier", () => {
     return row;
   }
 
-  async function approval(title: string, status = "pending", createdAt = new Date()) {
+  async function approval(title: string, status = "pending", createdAt = new Date(), tool?: string) {
     const [row] = await db.insert(approvals).values({
-      companyId, type: "request_board_approval", status, payload: { title }, createdAt, updatedAt: createdAt,
+      companyId, type: "request_board_approval", status, payload: tool ? { title, tool } : { title }, createdAt, updatedAt: createdAt,
     }).returning();
     return row;
   }
@@ -150,7 +188,8 @@ describeDb("approvalTelegramNotifier", () => {
   // createdAt just after t0 (so it passes `gte(createdAt, startedAt)` and counts as "fresh"
   // rather than falling into the restart catch-up query), then `clock` is advanced before the
   // sweep that is actually asserted on.
-  function setupCardAwareNotifier(hasCard: () => boolean) {
+  // Hermes cards this company's mail_send (PAPERCLIP_CARDED_TOOLS); call after company().
+  function setupCardAwareNotifier(hasCard: () => boolean, cardedTools: ReadonlySet<string> | null = new Set([`${companyId}:mail_send`])) {
     const t0 = new Date();
     let clock = t0;
     const telegram = fakeTelegram();
@@ -161,6 +200,7 @@ describeDb("approvalTelegramNotifier", () => {
       now: () => clock,
       hasCard,
       cardGraceMs: 600_000,
+      cardedTools,
     });
     return {
       notifier,
@@ -176,27 +216,54 @@ describeDb("approvalTelegramNotifier", () => {
     await company();
     const { notifier, sent, t0, advanceMinutes } = setupCardAwareNotifier(() => false);
     await notifier.sweep(); // flushes the restart catch-up query (nothing waiting yet)
-    await approval("Needs a card", "pending", new Date(t0.getTime() + 1_000));
+    await approval("Needs a card", "pending", new Date(t0.getTime() + 1_000), "mail_send");
     advanceMinutes(5);
     expect(await notifier.sweep()).toEqual({ sent: 0 });
     expect(sent).toHaveLength(0);
   });
 
-  it("fallback after 10 minutes: no card -> the plain alert with buttons", async () => {
+  it("fallback after 10 minutes: no card -> the plain alert with buttons, saying the card didn't arrive", async () => {
     await company();
     const { notifier, sent, t0, advanceMinutes } = setupCardAwareNotifier(() => false);
     await notifier.sweep();
-    await approval("Still no card", "pending", new Date(t0.getTime() + 1_000));
+    await approval("Still no card", "pending", new Date(t0.getTime() + 1_000), "mail_send");
     advanceMinutes(11);
     expect(await notifier.sweep()).toEqual({ sent: 1 });
     expect(sent).toHaveLength(1);
+    expect(sent[0].body.text).toContain(CARD_MISSED_LINE);
+  });
+
+  // Final-review I4: the grace is only for what Hermes cards. HQ alerts and a company's non-carded
+  // ask-first tools alert at once, as before cards existed, and carry no "card didn't arrive" line.
+  it("a tool Hermes doesn't card, or another company's carded tool, alerts at once", async () => {
+    await company();
+    const { notifier, sent, t0 } = setupCardAwareNotifier(() => false);
+    await notifier.sweep();
+    await approval("Not carded tool", "pending", new Date(t0.getTime() + 1_000), "norpex_prices_set");
+    await approval("No tool at all", "pending", new Date(t0.getTime() + 2_000));
+    const carded = companyId;
+    await company();
+    await approval("Same tool, other company", "pending", new Date(t0.getTime() + 3_000), "mail_send");
+    expect(carded).not.toBe(companyId);
+    expect(await notifier.sweep()).toEqual({ sent: 3 });
+    expect(sent.map((m) => m.body.text.split("\n")[1])).toEqual(["Not carded tool", "No tool at all", "Same tool, other company"]);
+    expect(sent.every((m) => !m.body.text.includes(CARD_MISSED_LINE))).toBe(true);
+  });
+
+  it("with PAPERCLIP_CARDED_TOOLS unset, nothing waits for a card", async () => {
+    await company();
+    const { notifier, sent, t0 } = setupCardAwareNotifier(() => false, null);
+    await notifier.sweep();
+    await approval("Would be carded", "pending", new Date(t0.getTime() + 1_000), "mail_send");
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
+    expect(sent[0].body.text).not.toContain(CARD_MISSED_LINE);
   });
 
   it("never alerts an approval that already has a card", async () => {
     await company();
     const { notifier, sent, t0, advanceMinutes } = setupCardAwareNotifier(() => true);
     await notifier.sweep();
-    await approval("Has a card", "pending", new Date(t0.getTime() + 1_000));
+    await approval("Has a card", "pending", new Date(t0.getTime() + 1_000), "mail_send");
     advanceMinutes(30);
     expect(await notifier.sweep()).toEqual({ sent: 0 });
     expect(sent).toHaveLength(0);
@@ -227,11 +294,12 @@ describeDb("approvalTelegramNotifier", () => {
   // honours the 10-minute card grace, and carries the same signed buttons as a card (incl. Change).
   it("with cards wired, the restart re-send waits out the card grace and carries the cards' signed buttons", async () => {
     await company();
+    const tool = "mail_send";
     const secret = "test-signing-secret";
     const t0 = new Date();
     let clock = t0;
-    const old = await approval("Waited 11 minutes before the restart", "pending", new Date(t0.getTime() - 11 * 60_000));
-    const young = await approval("Created 2 minutes before the restart", "pending", new Date(t0.getTime() - 2 * 60_000));
+    const old = await approval("Waited 11 minutes before the restart", "pending", new Date(t0.getTime() - 11 * 60_000), tool);
+    const young = await approval("Created 2 minutes before the restart", "pending", new Date(t0.getTime() - 2 * 60_000), tool);
     const viaEndpoint: Array<Record<string, unknown>> = [];
     const notifier = approvalTelegramNotifier(db, {
       sendViaEndpoint: async (body) => { viaEndpoint.push(body); return true; },
@@ -239,6 +307,7 @@ describeDb("approvalTelegramNotifier", () => {
       chatId: "1",
       now: () => clock,
       hasCard: () => false,
+      cardedTools: new Set([`${companyId}:${tool}`]),
     });
 
     expect(await notifier.sweep()).toEqual({ sent: 1 });

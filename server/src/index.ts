@@ -1,5 +1,5 @@
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
-import { approvalTelegramNotifier } from "./services/approval-telegram-notifier.js";
+import { approvalTelegramNotifier, parseCardedTools } from "./services/approval-telegram-notifier.js";
 import { approvalButtons } from "./services/approval-telegram-buttons.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
@@ -1325,8 +1325,10 @@ async function startServerWithDatabaseTeardown(
       chatId: process.env.PAPERCLIP_APPROVAL_TELEGRAM_CHAT_ID,
       publicBaseUrl: config.authPublicBaseUrl ?? null,
       // Aspireco: Hermes sends a short card per approval first; only fall back to this plain
-      // alert if no card arrived within the grace window (default 10 minutes).
+      // alert if no card arrived within the grace window (default 10 minutes). The grace applies
+      // only to the `companyId:tool` pairs Hermes cards (PAPERCLIP_CARDED_TOOLS); unset = none.
       hasCard: (id: string) => app.locals.approvalCards?.hasCard(id) ?? false,
+      cardedTools: parseCardedTools(process.env.PAPERCLIP_CARDED_TOOLS),
     });
     const decisionExecutor = decisionService(db as any, decisionServiceOptions);
     const retentionExecutor = decisionRetentionService(db as any, {

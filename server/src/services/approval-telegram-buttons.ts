@@ -13,6 +13,10 @@ import { telegramChatSdkCallbackData } from "./chat-interaction-publications.js"
  * for a repeat tap on an approval already in revision_requested (see approvalButtonHandler). */
 export const CHANGE_PROMPT_TEXT = "What should change? Reply to this message.";
 
+/** Aspireco: the action id behind a settled card's outcome label. A tap on it is only acknowledged:
+ * no edit and no message, so the card keeps its formatting. */
+export const SETTLED_CARD_ACTION = "pa-noop";
+
 type Decision = "approve" | "reject" | "change";
 const FLAG: Record<Decision, string> = { approve: "y", reject: "n", change: "c" };
 const FROM_FLAG: Record<string, Decision> = { y: "approve", n: "reject", c: "change" };
@@ -87,10 +91,11 @@ export function approvalButtonHandler(deps: {
 }) {
   return {
     /** null = not an approval button (let chat-channels handle it); otherwise the status line to show
-     * (or, for a Change tap, the force-reply prompt to send). */
+     * (or, for a Change tap, the force-reply prompt to send; for a settled card's label, answerOnly). */
     async handle(
       input: { actionId: string; userId: string; companyId: string },
-    ): Promise<string | { status: string; forceReply: string; approvalId: string } | null> {
+    ): Promise<string | { status: string; forceReply: string; approvalId: string } | { answerOnly: true } | null> {
+      if (input.actionId === SETTLED_CARD_ACTION) return { answerOnly: true };
       const parsed = decodeApprovalAction(deps.secret, input.actionId);
       if (!parsed) return input.actionId.startsWith(PREFIX) ? "This button is not valid. Open Paperclip to decide." : null;
       const approval = await deps.getApproval(parsed.approvalId);

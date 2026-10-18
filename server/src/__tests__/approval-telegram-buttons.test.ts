@@ -6,6 +6,7 @@ import {
   CHANGE_PROMPT_TEXT,
   decodeApprovalAction,
   encodeApprovalAction,
+  SETTLED_CARD_ACTION,
 } from "../services/approval-telegram-buttons.js";
 
 const SECRET = "test-signing-secret";
@@ -139,6 +140,15 @@ describe("approval button handler", () => {
   it("leaves non-approval actions to normal chat handling", async () => {
     const { handler } = setup(pending);
     expect(await handler.handle({ actionId: "question-1", userId: "u", companyId: "co-1" })).toBeNull();
+  });
+
+  // Final-review M1: a settled card's outcome label is a pa-noop button. A tap is only acknowledged:
+  // not "This button is not valid...", which would also have rewritten the card as plain text.
+  it("a tap on a settled card's outcome label is answer-only and decides nothing", async () => {
+    const { handler, decideApproval } = setup(pending);
+    expect(SETTLED_CARD_ACTION).toBe("pa-noop");
+    expect(await handler.handle({ actionId: SETTLED_CARD_ACTION, userId: "u", companyId: "co-1" })).toEqual({ answerOnly: true });
+    expect(decideApproval).not.toHaveBeenCalled();
   });
 });
 

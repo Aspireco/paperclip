@@ -1,4 +1,4 @@
-import { approvalButtonHandler, CHANGE_PROMPT_TEXT, decodeApprovalAction } from "./services/approval-telegram-buttons.js";
+import { approvalButtonHandler, CHANGE_PROMPT_TEXT, decodeApprovalAction, SETTLED_CARD_ACTION } from "./services/approval-telegram-buttons.js";
 import { changePrompts } from "./services/approval-change-prompts.js";
 import { approvalCards } from "./services/approval-telegram-cards.js";
 import { approvalCardRoutes } from "./routes/approval-cards.js";
@@ -634,7 +634,7 @@ export async function createApp(
       approvalCardsEndpointId
         ? chatChannels
             .editTelegramReplyMarkup(approvalCardsEndpointId, approvalCardsChatId, messageId, {
-              inline_keyboard: [[{ text: line, callback_data: telegramChatSdkCallbackData("pa-noop") }]],
+              inline_keyboard: [[{ text: line, callback_data: telegramChatSdkCallbackData(SETTLED_CARD_ACTION) }]],
             })
             .then((r) => r.ok)
         : Promise.resolve(false),
