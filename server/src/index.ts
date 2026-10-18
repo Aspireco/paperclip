@@ -1779,7 +1779,14 @@ async function startServerWithDatabaseTeardown(
           }));
 
         trackHeartbeatSchedulerWork(chatCompletionDeliveries.sweepPending().catch((err) => logger.error({ err }, "chat completion delivery failed")));
-        trackHeartbeatSchedulerWork(approvalAlerts.sweep().catch((err) => logger.error({ err }, "approval telegram alert sweep failed")));
+        // Aspireco: cards first (a restart reloads them from the approvals, so the alert sweep sees
+        // them), then the plain alerts; approved cards whose send was refused say so.
+        trackHeartbeatSchedulerWork(
+          Promise.resolve(app.locals.approvalCardsSweep?.())
+            .catch((err: unknown) => logger.error({ err }, "approval card sweep failed"))
+            .then(() => approvalAlerts.sweep())
+            .catch((err) => logger.error({ err }, "approval telegram alert sweep failed")),
+        );
         trackHeartbeatSchedulerWork(connectionDeliveries.sweepPending().catch((err) => logger.error({ err }, "connection continuation delivery failed")));
         trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "tool review recovery failed")));
         trackHeartbeatSchedulerWork(app.locals.toolActionDeliveries.sweepPending().catch((err: unknown) => logger.error({ err }, "tool review delivery sweep failed")));

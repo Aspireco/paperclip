@@ -1,6 +1,6 @@
 import { approvalButtonHandler, CHANGE_PROMPT_TEXT, decodeApprovalAction, SETTLED_CARD_ACTION } from "./services/approval-telegram-buttons.js";
 import { changePrompts } from "./services/approval-change-prompts.js";
-import { approvalCards } from "./services/approval-telegram-cards.js";
+import { approvalCards, type CardOutcome, type CardRecord } from "./services/approval-telegram-cards.js";
 import { approvalCardRoutes } from "./routes/approval-cards.js";
 import { readSignedToolArguments } from "./services/tool-content-guards.js";
 import { telegramChatSdkCallbackData } from "./services/chat-interaction-publications.js";
@@ -24,8 +24,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
-import { authUsers, toolActionRequests, toolInvocations } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { approvals, authUsers, toolActionRequests, toolInvocations } from "@paperclipai/db";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import {
   derivePaperclipViteHmrPort,
   type DeploymentExposure,
@@ -644,8 +644,63 @@ export async function createApp(
             })
             .then((r) => r.ok)
         : Promise.resolve(false),
+    // Aspireco (final review I5): the card's message id lives on the approval, so a restart
+    // remembers it instead of sending a second, plain alert for an approval that has a card.
+    persist: async (approvalId, record) => {
+      await db
+        .update(approvals)
+        .set({ payload: sql`coalesce(${approvals.payload}, '{}'::jsonb) || jsonb_build_object('telegramCard', ${JSON.stringify(record)}::jsonb)` })
+        .where(eq(approvals.id, approvalId));
+    },
+    outcome: approvalCardOutcome,
   });
   app.locals.approvalCards = approvalCardsStore;
+  // Aspireco: the cards Paperclip has sent in the last two days, from the approvals themselves.
+  async function cardRows(statuses: string[]) {
+    const rows = await db
+      .select({ id: approvals.id, card: sql<CardRecord | null>`${approvals.payload}->'telegramCard'` })
+      .from(approvals)
+      .where(and(
+        inArray(approvals.status, statuses),
+        sql`${approvals.payload} -> 'telegramCard' is not null`,
+        gte(approvals.updatedAt, new Date(Date.now() - 2 * 24 * 3600_000)),
+      ));
+    return rows.flatMap((r) => (r.card && typeof r.card.messageId === "number" ? [{ approvalId: r.id, record: r.card }] : []));
+  }
+  // Aspireco (final review I3): what happened to the call John's ✅ released. Business OS refusals
+  // reach Paperclip as failed calls ("Business OS refused (409 stale): ..."); a quote sent with
+  // gaps answers 200 with "sent": false.
+  async function approvalCardOutcome(approvalId: string): Promise<CardOutcome> {
+    const [row] = await db
+      .select({
+        request: toolActionRequests.status,
+        invocation: toolInvocations.status,
+        error: toolInvocations.errorMessage,
+        result: toolInvocations.resultSummary,
+      })
+      .from(toolActionRequests)
+      .innerJoin(toolInvocations, eq(toolInvocations.id, toolActionRequests.invocationId))
+      .where(eq(toolActionRequests.approvalId, approvalId))
+      .limit(1);
+    if (!row) return { done: true };
+    if (["expired", "cancelled"].includes(row.request)) return { done: true, refused: "expired" };
+    if (row.request === "failed" || ["failed", "timed_out"].includes(row.invocation)) {
+      const error = row.error ?? "";
+      const code = /refused \((\d{3}) ([a-z_]+)\)/.exec(error);
+      return { done: true, refused: code ? code[2].replace(/_/g, " ") : error.slice(0, 60) || "the call failed" };
+    }
+    if (row.request !== "executed" && row.invocation !== "succeeded") return { done: false };
+    const summary = typeof row.result?.summary === "string" ? row.result.summary : "";
+    if (/"sent"\s*:\s*false/.test(summary)) {
+      const gaps = /"gaps"\s*:\s*\[([^\]]*)\]/.exec(summary);
+      return { done: true, refused: gaps ? gaps[1].replace(/"/g, "").replace(/,/g, ", ").slice(0, 60) || "not sent" : "not sent" };
+    }
+    return { done: true };
+  }
+  app.locals.approvalCardsSweep = async () => {
+    approvalCardsStore.seed(await cardRows(["pending", "revision_requested"]));
+    return approvalCardsStore.checkOutcomes(await cardRows(["approved"]));
+  };
   // Aspireco: John's reply to the ✏️ Change force-reply prompt is posted on that approval as his
   // comment, which wakes the requesting agent. Late-bound like approvalButtonsHandler above: the
   // approvals router is built further down.

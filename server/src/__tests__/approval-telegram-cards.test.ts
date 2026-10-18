@@ -63,4 +63,49 @@ describe("approvalCards", () => {
     await cards.settle(ID, "again");
     expect(d.edit).not.toHaveBeenCalled();
   });
+
+  it("remembers each card on the approval, and a settle keeps the record with its outcome line", async () => {
+    const { d } = deps([{ ok: true, messageId: 40 }]);
+    const persist = vi.fn(async () => undefined);
+    const cards = approvalCards({ ...d, persist });
+    await cards.send(ID, { text: "card", parts: [] }, { buttons: true });
+    expect(persist).toHaveBeenLastCalledWith(ID, { messageId: 40 });
+    await cards.settle(ID, "✅ Approved by John");
+    expect(persist).toHaveBeenLastCalledWith(ID, { messageId: 40, settled: "✅ Approved by John" });
+  });
+
+  it("after a restart, seed makes the unsettled cards live again (no second plain alert)", () => {
+    const { d } = deps([]);
+    const cards = approvalCards(d);
+    cards.seed([{ approvalId: ID, record: { messageId: 50 } }, { approvalId: "done-id", record: { messageId: 51, settled: "x" } }]);
+    expect(cards.hasCard(ID)).toBe(true);
+    expect(cards.isCardMessage(ID, 50)).toBe(true);
+    expect(cards.hasCard("done-id")).toBe(false);
+  });
+
+  it("an approved card whose send was refused says so, once", async () => {
+    const { d } = deps([]);
+    const persist = vi.fn(async () => undefined);
+    const outcome = vi.fn(async () => ({ done: true as const, refused: "stale" }));
+    const cards = approvalCards({ ...d, persist, outcome });
+    const rows = [{ approvalId: ID, record: { messageId: 60, settled: "✅ Approved by John" } }];
+    expect(await cards.checkOutcomes(rows)).toBe(1);
+    expect(d.edit).toHaveBeenCalledWith(60, "✅ Approved by John · ⚠️ not sent: stale");
+    expect(persist).toHaveBeenLastCalledWith(ID, { messageId: 60, settled: "✅ Approved by John", checked: true });
+    expect(await cards.checkOutcomes([{ approvalId: ID, record: { ...rows[0].record, checked: true } }])).toBe(0);
+  });
+
+  it("a send that went out, or one still running, leaves the card alone", async () => {
+    const { d } = deps([]);
+    const persist = vi.fn(async () => undefined);
+    const results = [{ done: false as const }, { done: true as const }];
+    const cards = approvalCards({ ...d, persist, outcome: vi.fn(async () => results.shift()!) });
+    const rows = [{ approvalId: ID, record: { messageId: 70, settled: "✅ Approved by John" } }];
+    await cards.checkOutcomes(rows);
+    expect(persist).not.toHaveBeenCalled();
+    await cards.checkOutcomes(rows);
+    expect(d.edit).not.toHaveBeenCalled();
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
 });
+
