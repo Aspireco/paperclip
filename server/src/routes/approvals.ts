@@ -673,9 +673,13 @@ export function approvalRoutes(
     });
 
     const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(id).catch(() => []);
+    // The first issue whose mirrored comment landed is the task the agent wakes on, with that comment
+    // as its wake comment, so the run opens on the task with John's note in context.
+    let wakeIssueComment: { issueId: string; commentId: string } | null = null;
     for (const issue of linkedIssues) {
       try {
-        await issuesSvc.addComment(issue.id, body, { userId }, { authorType: "user" });
+        const issueComment = await issuesSvc.addComment(issue.id, body, { userId }, { authorType: "user" });
+        if (!wakeIssueComment) wakeIssueComment = { issueId: issue.id, commentId: issueComment.id };
       } catch (err) {
         logger.warn(
           { err, approvalId: id, issueId: issue.id },
@@ -687,18 +691,32 @@ export function approvalRoutes(
     const approval = await svc.getById(id).catch(() => null);
     if (approval?.requestedByAgentId) {
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
+      // Same task context as decideApproval's wake (issueId/taskId) plus the issue-comment wake's
+      // commentId/wakeCommentId, so heartbeat opens the run on that issue with the note loaded.
+      const primaryIssueId = wakeIssueComment?.issueId ?? linkedIssueIds[0] ?? null;
+      const wakeComment = wakeIssueComment
+        ? { commentId: wakeIssueComment.commentId, wakeCommentId: wakeIssueComment.commentId }
+        : {};
       try {
         const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
           source: "automation",
           triggerDetail: "system",
           reason: "approval_change_requested",
-          payload: { approvalId: id, issueIds: linkedIssueIds },
+          payload: {
+            approvalId: id,
+            issueId: primaryIssueId,
+            issueIds: linkedIssueIds,
+            ...(wakeIssueComment ? { commentId: wakeIssueComment.commentId } : {}),
+          },
           requestedByActorType: "user",
           requestedByActorId: userId,
           contextSnapshot: {
             source: "approval.change_comment",
             approvalId: id,
+            issueId: primaryIssueId,
             issueIds: linkedIssueIds,
+            taskId: primaryIssueId,
+            ...wakeComment,
             wakeReason: "approval_change_requested",
           },
         });
