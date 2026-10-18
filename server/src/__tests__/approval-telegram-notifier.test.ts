@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { approvals, companies, createDb } from "@paperclipai/db";
 import { approvalTelegramMessage, approvalTelegramNotifier } from "../services/approval-telegram-notifier.js";
+import { approvalButtons } from "../services/approval-telegram-buttons.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -199,6 +200,56 @@ describeDb("approvalTelegramNotifier", () => {
     advanceMinutes(30);
     expect(await notifier.sweep()).toEqual({ sent: 0 });
     expect(sent).toHaveLength(0);
+  });
+
+  // Aspireco 2026-10-15: an alert sent before a restart may have gone out through the plain bot (no
+  // buttons), so with the endpoint bot whatever is still waiting is re-sent, each with its own buttons.
+  it("with the endpoint bot, approvals already waiting at a restart are re-sent one by one with their buttons", async () => {
+    await company();
+    const waiting = await approval("Waiting since before the restart", "pending", new Date(Date.now() - 60_000));
+    const viaEndpoint: Array<Record<string, unknown>> = [];
+    const telegram = fakeTelegram();
+    const notifier = approvalTelegramNotifier(db, {
+      sendViaEndpoint: async (body) => { viaEndpoint.push(body); return true; },
+      buttonsFor: (id) => ({ inline_keyboard: [[{ text: "✅ Approve", callback_data: `y${id}` }]] }),
+      botToken: "123:abc", chatId: "1", fetchImpl: telegram.fetchImpl,
+    });
+
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
+    expect(await notifier.sweep()).toEqual({ sent: 0 });
+    expect(viaEndpoint).toHaveLength(1);
+    expect(String(viaEndpoint[0].text)).toContain("Waiting since before the restart");
+    expect(viaEndpoint[0].reply_markup).toEqual({ inline_keyboard: [[{ text: "✅ Approve", callback_data: `y${waiting.id}` }]] });
+    expect(telegram.sent).toHaveLength(0);
+  });
+
+  // Merge of hq-pinned's restart re-send with this branch's cards: in card mode the re-send still
+  // honours the 10-minute card grace, and carries the same signed buttons as a card (incl. Change).
+  it("with cards wired, the restart re-send waits out the card grace and carries the cards' signed buttons", async () => {
+    await company();
+    const secret = "test-signing-secret";
+    const t0 = new Date();
+    let clock = t0;
+    const old = await approval("Waited 11 minutes before the restart", "pending", new Date(t0.getTime() - 11 * 60_000));
+    const young = await approval("Created 2 minutes before the restart", "pending", new Date(t0.getTime() - 2 * 60_000));
+    const viaEndpoint: Array<Record<string, unknown>> = [];
+    const notifier = approvalTelegramNotifier(db, {
+      sendViaEndpoint: async (body) => { viaEndpoint.push(body); return true; },
+      buttonsFor: (id) => approvalButtons(secret, id),
+      chatId: "1",
+      now: () => clock,
+      hasCard: () => false,
+    });
+
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
+    expect(String(viaEndpoint[0].text)).toContain("Waited 11 minutes before the restart");
+    expect(viaEndpoint[0].reply_markup).toEqual(approvalButtons(secret, old.id));
+    expect((viaEndpoint[0].reply_markup as ReturnType<typeof approvalButtons>).inline_keyboard[0].map((b) => b.text))
+      .toEqual(["✅ Approve", "❌ Reject", "✏️ Change"]);
+
+    clock = new Date(t0.getTime() + 9 * 60_000);
+    expect(await notifier.sweep()).toEqual({ sent: 1 });
+    expect(viaEndpoint[1].reply_markup).toEqual(approvalButtons(secret, young.id));
   });
 
   it("a failed send is retried on the next sweep, not dropped", async () => {

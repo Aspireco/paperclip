@@ -49,17 +49,24 @@ describe("approval button encoding", () => {
 });
 
 describe("approval button handler", () => {
-  function setup(approval: { id: string; companyId: string; status: string } | null, decided?: unknown) {
+  function setup(
+    approval: { id: string; companyId: string; status: string } | null,
+    decided?: unknown,
+    isActiveDecider?: (userId: string, companyId: string) => Promise<boolean>,
+  ) {
     const decideApproval = vi.fn(async () => (decided ?? { outcome: "decided", approval: { ...approval!, status: "approved" }, applied: true }) as never);
+    const decider = isActiveDecider ? vi.fn(isActiveDecider) : undefined;
     const handler = approvalButtonHandler({
       secret: SECRET,
       getApproval: async () => approval,
       decideApproval,
-      isActiveMember: async (_u: string, c: string) => c === "co-1",
+      // Merge of hq-pinned's isActiveDecider into this branch's isActiveMember (one check): a test that
+      // passes a check gets it as isActiveMember; otherwise the user is a member of co-1 only.
+      isActiveMember: decider ?? (async (_u: string, c: string) => c === "co-1"),
       requestChange: vi.fn(async () => ({ promptText: "What should change? Reply to this message." })),
       userLabel: async () => "John",
     });
-    return { handler, decideApproval };
+    return { handler, decideApproval, decider };
   }
   const pending = { id: ID, companyId: "co-1", status: "pending" };
 
@@ -77,11 +84,36 @@ describe("approval button handler", () => {
     expect(decideApproval).toHaveBeenCalledWith(ID, "reject", "user-john");
   });
 
-  it("does nothing for an approval in another company", async () => {
+  it("does nothing for an approval in another company the user is not a member of", async () => {
     const { handler, decideApproval } = setup({ ...pending, companyId: "co-2" });
     const status = await handler.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "u", companyId: "co-1" });
     expect(status).toBe("This approval is not available here.");
     expect(decideApproval).not.toHaveBeenCalled();
+  });
+
+  // Aspireco 2026-10-15: one Telegram bot (the HQ org's endpoint) alerts for every org's approvals, so a
+  // tap on another org's approval must work for someone who can decide approvals in THAT org.
+  it("decides another company's approval when the tapping user is an active non-viewer member there", async () => {
+    const { handler, decideApproval, decider } = setup({ ...pending, companyId: "co-2" }, undefined, async () => true);
+    const status = await handler.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "user-john", companyId: "co-1" });
+    expect(status).toBe("✅ Approved by John");
+    expect(decider).toHaveBeenCalledWith("user-john", "co-2");
+    expect(decideApproval).toHaveBeenCalledWith(ID, "approve", "user-john");
+  });
+
+  it("does nothing for another company's approval when the tapping user cannot decide there", async () => {
+    const { handler, decideApproval, decider } = setup({ ...pending, companyId: "co-2" }, undefined, async () => false);
+    const status = await handler.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "u", companyId: "co-1" });
+    expect(status).toBe("This approval is not available here.");
+    expect(decider).toHaveBeenCalledWith("u", "co-2");
+    expect(decideApproval).not.toHaveBeenCalled();
+  });
+
+  it("does not consult the membership check for the endpoint's own company", async () => {
+    const { handler, decider } = setup(pending, undefined, async () => false);
+    const status = await handler.handle({ actionId: encodeApprovalAction(SECRET, "approve", ID), userId: "user-john", companyId: "co-1" });
+    expect(status).toBe("✅ Approved by John");
+    expect(decider).not.toHaveBeenCalled();
   });
 
   it("does nothing for an approval already decided", async () => {

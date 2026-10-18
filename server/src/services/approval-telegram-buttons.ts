@@ -1,9 +1,10 @@
 // Aspireco: approve/reject/change an approval with one tap in Telegram (John's choice, 2026-10-12,
 // over upstream's "tool side effects stay in Paperclip"). Safety: a tap only acts when it arrives
 // through Paperclip's verified Telegram webhook from a principal linked to an active non-viewer
-// member (chat-channels checks that before calling handle()), the button is HMAC-signed for exactly
-// one approval and decision, and the approval must belong to a company where the tapping user is an
-// active non-viewer member (was: the endpoint's company). Deciding goes through the same
+// member of the endpoint's company (chat-channels checks that before calling handle()), the button
+// is HMAC-signed for exactly one approval and decision, and the approval must belong to the
+// endpoint's company or (2026-10-15: one bot alerts for every company) to another company where the
+// same user is an active non-viewer member (isActiveMember). Deciding goes through the same
 // decideApproval() as the board's Approvals page.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { telegramChatSdkCallbackData } from "./chat-interaction-publications.js";
@@ -93,7 +94,14 @@ export function approvalButtonHandler(deps: {
       const parsed = decodeApprovalAction(deps.secret, input.actionId);
       if (!parsed) return input.actionId.startsWith(PREFIX) ? "This button is not valid. Open Paperclip to decide." : null;
       const approval = await deps.getApproval(parsed.approvalId);
-      if (!approval || !(await deps.isActiveMember(input.userId, approval.companyId))) {
+      if (!approval) return "This approval is not available here.";
+      // The endpoint's own company: chat-channels already confirmed the tapping user is an active
+      // non-viewer member there. Any other company: the same rule, checked in that company; a
+      // failed check refuses.
+      if (
+        approval.companyId !== input.companyId &&
+        !(await deps.isActiveMember(input.userId, approval.companyId).catch(() => false))
+      ) {
         return "This approval is not available here.";
       }
       if (approval.status !== "pending" && approval.status !== "revision_requested") {
