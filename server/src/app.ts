@@ -571,6 +571,12 @@ export async function createApp(
   // must be reachable by remote adapters that intentionally do not receive an
   // agent API key. Every request revalidates the active heartbeat row.
   app.use(runtimeConnectionIntentRoutes(db));
+  // Aspireco: Hermes's approval-card routes carry their own bearer (PAPERCLIP_HERMES_TOKEN), so
+  // they must run BEFORE the actor middleware, which treats any bearer as an agent key and 401s
+  // it ("Agent token did not verify"). Late-bound: the router is built further down, once the
+  // approvals router exists; requests that match none of its four routes fall through untouched.
+  let approvalCardsRouter: express.RequestHandler | null = null;
+  app.use("/api", (req, res, next) => (approvalCardsRouter ? approvalCardsRouter(req, res, next) : next()));
   app.use(
     actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
@@ -878,22 +884,19 @@ export async function createApp(
       expiresAt: held.expiresAt ? held.expiresAt.toISOString() : null,
     };
   }
-  app.use(
-    "/api",
-    approvalCardRoutes({
-      hermesToken: process.env.PAPERCLIP_HERMES_TOKEN,
-      getApproval: (id) => approvalsRouter.getApproval(id),
-      toolAction: approvalCardToolAction,
-      cards: approvalCardsStore,
-      cardsConfigured: approvalCardsConfigured,
-      decideApproval: (id, decision, userId, note) =>
-        approvalsRouter.decideApproval(id, decision, userId, note),
-      rejectApproval: async (id, note) => {
-        const result = await approvalsRouter.decideApproval(id, "reject", "auto-approver", note);
-        return { applied: result.outcome === "decided" && result.applied };
-      },
-    }),
-  );
+  approvalCardsRouter = approvalCardRoutes({
+    hermesToken: process.env.PAPERCLIP_HERMES_TOKEN,
+    getApproval: (id) => approvalsRouter.getApproval(id),
+    toolAction: approvalCardToolAction,
+    cards: approvalCardsStore,
+    cardsConfigured: approvalCardsConfigured,
+    decideApproval: (id, decision, userId, note) =>
+      approvalsRouter.decideApproval(id, decision, userId, note),
+    rejectApproval: async (id, note) => {
+      const result = await approvalsRouter.decideApproval(id, "reject", "auto-approver", note);
+      return { applied: result.outcome === "decided" && result.applied };
+    },
+  });
   api.use(secretRoutes(db));
   api.use(managedAgentProfileRoutes(db));
   api.use(remoteAgentProfileRoutes(db));
