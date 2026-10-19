@@ -6,6 +6,7 @@ import {
   approvalTelegramMessage,
   approvalTelegramNotifier,
   CARD_MISSED_LINE,
+  toolActionLabel,
   parseCardedTools,
 } from "../services/approval-telegram-notifier.js";
 import { approvalButtons } from "../services/approval-telegram-buttons.js";
@@ -54,6 +55,35 @@ describe("approvalTelegramMessage", () => {
       "The full card didn't arrive — open the board to see what you're approving.",
       "Open: https://hq.example/NOR/approvals/ap-1",
     ]);
+  });
+});
+
+describe("a held tool call reads as what it does", () => {
+  it("names the action in plain words, drops the gateway's wording, and says where to read it", () => {
+    const text = approvalTelegramMessage({
+      approvalId: "ap-2",
+      companyName: "Norpex",
+      issuePrefix: "NOR",
+      payload: {
+        tool: "mcp.app-gallery-link-fe0e95ef-7d71-42b8-b7c3-f307d11c31fe-61d0d722:mail-send",
+        title: "Approve high-risk tool action: mcp.app-gallery-link-fe0e95ef-7d71-42b8-b7c3-f307d11c31fe-61d0d722:mail-send",
+        summary: "mcp.app-gallery-link-...:mail-send is classified as destructive and requires formal board approval before execution.",
+      },
+      publicBaseUrl: "https://hq.example",
+    });
+    expect(text.split("\n")).toEqual([
+      "Approval needed - Norpex",
+      "Send an email?",
+      "Open the board to read exactly what it will do before you approve.",
+      "Open: https://hq.example/NOR/approvals/ap-2",
+    ]);
+    expect(text).not.toContain("mcp.");
+  });
+
+  it("labels the quote and store-change tools, and an unknown tool by its own name", () => {
+    expect(toolActionLabel("mcp.x-61d0d722:norpex-quotes-send")).toBe("Send a quote to a customer");
+    expect(toolActionLabel("mcp.x-61d0d722:norpex-apply")).toBe("Apply a change on the Norpex store");
+    expect(toolActionLabel("mcp.x-61d0d722:orders-write")).toBe("Run orders write");
   });
 });
 

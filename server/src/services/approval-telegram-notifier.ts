@@ -48,6 +48,20 @@ function clip(text: unknown, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
+const TOOL_ACTIONS: Record<string, string> = {
+  mail_send: "Send an email",
+  norpex_apply: "Apply a change on the Norpex store",
+  norpex_quotes_send: "Send a quote to a customer",
+};
+
+/** `mcp.app-gallery-link-<uuid>-<conn>:mail-send` → "Send an email"; an unknown tool → "Run <name>". */
+export function toolActionLabel(tool: string): string {
+  const name = (tool.startsWith("mcp.") ? tool.slice(tool.lastIndexOf(":") + 1) : tool).replace(/-/g, "_");
+  return TOOL_ACTIONS[name] ?? `Run ${name.replace(/_/g, " ")}`;
+}
+
+export const TOOL_ALERT_LINE = "Open the board to read exactly what it will do before you approve.";
+
 export function approvalTelegramMessage(input: {
   approvalId: string;
   companyName: string;
@@ -58,8 +72,13 @@ export function approvalTelegramMessage(input: {
   cardMissed?: boolean;
 }): string {
   const payload = (input.payload ?? {}) as Record<string, unknown>;
-  const title = clip(payload.title, 160) || "An approval is waiting";
-  const summary = clip(payload.summary, 300);
+  // Aspireco 2026-10-18 (John: "things coming are not clear"): a held tool call reads as what it
+  // does ("Send an email?"), never as the gateway's "Approve high-risk tool action: mcp.<id>:...".
+  // Only the gateway's own generic wording is replaced; a title someone wrote is kept as it is.
+  const generic = typeof payload.title === "string" && payload.title.startsWith("Approve high-risk tool action");
+  const action = generic && typeof payload.tool === "string" ? toolActionLabel(payload.tool) : null;
+  const title = action ? `${action}?` : clip(payload.title, 160) || "An approval is waiting";
+  const summary = action ? "" : clip(payload.summary, 300);
   const link = input.publicBaseUrl
     ? `${input.publicBaseUrl.replace(/\/+$/, "")}/${input.issuePrefix}/approvals/${input.approvalId}`
     : null;
@@ -67,7 +86,7 @@ export function approvalTelegramMessage(input: {
     `Approval needed - ${input.companyName}`,
     title,
     summary,
-    input.cardMissed ? CARD_MISSED_LINE : "",
+    input.cardMissed ? CARD_MISSED_LINE : action ? TOOL_ALERT_LINE : "",
     link ? `Open: ${link}` : "",
   ]
     .filter(Boolean)
