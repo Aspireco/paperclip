@@ -2,6 +2,7 @@ import { approvalButtonHandler, CHANGE_PROMPT_TEXT, decodeApprovalAction, SETTLE
 import { changePrompts } from "./services/approval-change-prompts.js";
 import { approvalCards, type CardOutcome, type CardRecord } from "./services/approval-telegram-cards.js";
 import { approvalCardRoutes } from "./routes/approval-cards.js";
+import { approvalService, logActivity } from "./services/index.js";
 import { readSignedToolArguments } from "./services/tool-content-guards.js";
 import { telegramChatSdkCallbackData } from "./services/chat-interaction-publications.js";
 import { accessService } from "./services/access.js";
@@ -939,12 +940,38 @@ export async function createApp(
       expiresAt: held.expiresAt ? held.expiresAt.toISOString() : null,
     };
   }
+  // Aspireco (John 2026-10-18, option 1): the comment author is the agent whose approval this is,
+  // so the board page shows the comment as coming from that agent, not from "Hermes". `logActivity`
+  // is `actorType: "system"` the way the active-run watchdog's own system writes are, since this is
+  // Hermes posting on the agent's behalf, not a board session.
+  const approvalsSvcForDetails = approvalService(db);
+  async function addDetails(approvalId: string, text: string, version: string, agentId: string | null) {
+    const comment = await approvalsSvcForDetails.addComment(approvalId, text, { agentId: agentId ?? undefined });
+    await db
+      .update(approvals)
+      .set({
+        payload: sql`coalesce(${approvals.payload}, '{}'::jsonb) || jsonb_build_object('details', jsonb_build_object('version', ${version}::text, 'commentId', ${comment.id}::text))`,
+      })
+      .where(eq(approvals.id, approvalId));
+    await logActivity(db, {
+      companyId: comment.companyId,
+      actorType: "system",
+      actorId: "hermes",
+      agentId,
+      action: "approval.comment_added",
+      entityType: "approval",
+      entityId: approvalId,
+      details: { commentId: comment.id },
+    });
+    return { commentId: comment.id };
+  }
   approvalCardsRouter = approvalCardRoutes({
     hermesToken: process.env.PAPERCLIP_HERMES_TOKEN,
     getApproval: (id) => approvalsRouter.getApproval(id),
     toolAction: approvalCardToolAction,
     cards: approvalCardsStore,
     cardsConfigured: approvalCardsConfigured,
+    addDetails,
     decideApproval: (id, decision, userId, note) =>
       approvalsRouter.decideApproval(id, decision, userId, note),
     rejectApproval: async (id, note) => {

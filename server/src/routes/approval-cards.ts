@@ -10,12 +10,25 @@ type SendResult = { ok: boolean; messageIds: number[] };
 
 export function approvalCardRoutes(deps: {
   hermesToken: string | undefined;
-  getApproval: (id: string) => Promise<{ id: string; companyId: string; status: string } | null>;
+  getApproval: (
+    id: string,
+  ) => Promise<
+    { id: string; companyId: string; status: string; requestedByAgentId: string | null; payload: unknown } | null
+  >;
   toolAction: (id: string) => Promise<{ tool: string; arguments: unknown; expiresAt: string | null } | null>;
   cards: {
     send: (approvalId: string, card: { text: string; parts: string[] }, opts: { buttons: boolean }) => Promise<SendResult>;
     settle: (id: string, line: string) => Promise<void>;
   };
+  /** Adds the full readable detail text as an approval comment, authored by the requesting agent
+   * (option 1, John 2026-10-18: the board carries the detail, Telegram carries only a link). Also
+   * stamps `payload.details` so a retry of the same version is a no-op. */
+  addDetails: (
+    approvalId: string,
+    text: string,
+    version: string,
+    agentId: string | null,
+  ) => Promise<{ commentId: string }>;
   /** Fail-closed gate for an actionable (buttons:true) card: false when signing or delivery isn't
    * fully configured, so Hermes never gets a 200 for a card whose buttons can't be decoded. */
   cardsConfigured: boolean;
@@ -60,6 +73,31 @@ export function approvalCardRoutes(deps: {
     if (buttons && !deps.cardsConfigured) return res.status(503).json({ error: "not_configured" });
     const out = await deps.cards.send(approval.id, { text, parts }, { buttons });
     return out.ok ? res.json({ messageIds: out.messageIds }) : res.status(502).json({ error: "telegram", messageIds: out.messageIds });
+  });
+
+  // Aspireco (John 2026-10-18, option 1): the full detail text lives on the approval, as a
+  // comment Hermes adds before it sends John the short Telegram line. Idempotent per `version` —
+  // Hermes retries the same tick's post if the ping after it fails, and that retry must not add a
+  // second comment.
+  router.post("/approvals/:id/details", requireHermes, async (req, res) => {
+    const approval = await deps.getApproval(req.params.id as string);
+    if (!approval) return res.status(404).json({ error: "not_found" });
+    if (!OPEN.has(approval.status)) return res.status(409).json({ error: "not_pending" });
+    const text = req.body?.text;
+    const version = req.body?.version;
+    if (typeof text !== "string" || text.length < 1 || text.length > 20000) {
+      return res.status(400).json({ error: "text_required" });
+    }
+    if (typeof version !== "string" || version.length < 1 || version.length > 128) {
+      return res.status(400).json({ error: "version_required" });
+    }
+    const existingDetails = (approval.payload as { details?: { version?: string; commentId?: string } } | null)
+      ?.details;
+    if (existingDetails && existingDetails.version === version) {
+      return res.status(200).json({ commentId: existingDetails.commentId, existing: true });
+    }
+    const { commentId } = await deps.addDetails(approval.id, text, version, approval.requestedByAgentId);
+    return res.status(201).json({ commentId });
   });
 
   router.post("/approvals/:id/auto-approve", requireHermes, async (req, res) => {

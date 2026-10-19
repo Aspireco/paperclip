@@ -10,9 +10,10 @@ function app(over: Partial<Parameters<typeof approvalCardRoutes>[0]> = {}) {
   const deps = {
     hermesToken: TOKEN,
     cardsConfigured: true,
-    getApproval: vi.fn(async () => ({ id: ID, companyId: "co", status: "pending" })),
+    getApproval: vi.fn(async () => ({ id: ID, companyId: "co", status: "pending", requestedByAgentId: "agent-1", payload: {} })),
     toolAction: vi.fn(async () => ({ tool: "mail_send", arguments: { op: "send_draft", params: { id: "d1" }, body: { expectedHash: "ab" } }, expiresAt: "2026-10-16T00:00:00Z" })),
     cards: { send: vi.fn(async () => ({ ok: true, messageIds: [1] })), settle: vi.fn(async () => {}) },
+    addDetails: vi.fn(async () => ({ commentId: "comment-1" })),
     decideApproval: vi.fn(async () => ({ outcome: "decided", approval: { id: ID, status: "approved" }, applied: true })),
     rejectApproval: vi.fn(async () => ({ applied: true })),
     ...over,
@@ -147,5 +148,49 @@ describe("approval card routes", () => {
     const { a } = app({ hermesToken: "   " });
     const r = await request(a).get(`/api/approvals/${ID}/tool-action`).set("authorization", "Bearer    ");
     expect(r.status).toBe(401);
+  });
+
+  // John 2026-10-18 (option 1): the full detail text lives on the approval as a comment, before
+  // Telegram ever gets a short line pointing at it.
+  describe("POST /approvals/:id/details", () => {
+    it("refuses without the bearer", async () => {
+      const { a } = app();
+      const r = await request(a).post(`/api/approvals/${ID}/details`).send({ text: "the full email", version: "v1" });
+      expect(r.status).toBe(401);
+    });
+    it("400s a bad body", async () => {
+      const { a } = app();
+      const r1 = await request(a).post(`/api/approvals/${ID}/details`).set("authorization", `Bearer ${TOKEN}`).send({ version: "v1" });
+      expect(r1.status).toBe(400);
+      const r2 = await request(a).post(`/api/approvals/${ID}/details`).set("authorization", `Bearer ${TOKEN}`).send({ text: "x" });
+      expect(r2.status).toBe(400);
+    });
+    it("409s when the approval isn't open", async () => {
+      const { a } = app({ getApproval: vi.fn(async () => ({ id: ID, companyId: "co", status: "approved", requestedByAgentId: null, payload: {} })) });
+      const r = await request(a).post(`/api/approvals/${ID}/details`).set("authorization", `Bearer ${TOKEN}`).send({ text: "x", version: "v1" });
+      expect(r.status).toBe(409);
+    });
+    it("201s on the first call and adds the detail comment", async () => {
+      const { a, deps } = app();
+      const r = await request(a).post(`/api/approvals/${ID}/details`).set("authorization", `Bearer ${TOKEN}`).send({ text: "the full email body", version: "v1" });
+      expect(r.status).toBe(201);
+      expect(r.body.commentId).toBe("comment-1");
+      expect(deps.addDetails).toHaveBeenCalledWith(ID, "the full email body", "v1", "agent-1");
+    });
+    it("200s with existing:true on a retry of the same version, and adds nothing", async () => {
+      const { a, deps } = app({
+        getApproval: vi.fn(async () => ({
+          id: ID,
+          companyId: "co",
+          status: "pending",
+          requestedByAgentId: "agent-1",
+          payload: { details: { version: "v1", commentId: "comment-1" } },
+        })),
+      });
+      const r = await request(a).post(`/api/approvals/${ID}/details`).set("authorization", `Bearer ${TOKEN}`).send({ text: "the full email body", version: "v1" });
+      expect(r.status).toBe(200);
+      expect(r.body).toEqual({ commentId: "comment-1", existing: true });
+      expect(deps.addDetails).not.toHaveBeenCalled();
+    });
   });
 });
