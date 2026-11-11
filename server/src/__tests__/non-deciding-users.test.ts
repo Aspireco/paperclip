@@ -91,6 +91,11 @@ describe("nonDecidingUserGuard", () => {
     ["post", "/api/issues/i1/comments", { body: "hi", authorType: "user" }],
     ["post", "/api/companies/c1/issues", { title: "t", reviewPolicy: "anyone" }],
     ["post", "/api/companies/c1/issues", { title: "t", projectId: "p" }],
+    ["post", "/api/companies/c1/issues", { title: "t", status: "done" }],
+    ["post", "/api/companies/c1/issues", { title: "t", status: "cancelled" }],
+    ["post", "/api/companies/c1/issues", { title: "t", status: "in_review" }],
+    ["patch", "/api/issues/i1", { status: "done" }],
+    ["patch", "/api/issues/i1", { status: "in_review" }],
     ["post", "/api/agents/a1/resume", { force: true }],
     ["put", "/api/agents/a1/instructions-bundle/file", { path: "AGENTS.md", content: "x", baseHash: "h", clearLegacyPromptTemplate: true }],
   ])("refuses extra body fields from a listed user: %s %s %j", async (method, path, body) => {

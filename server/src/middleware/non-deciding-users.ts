@@ -10,17 +10,25 @@ import type { Request, RequestHandler } from "express";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 // Each allowed write also limits the body to plain fields, so a listed user cannot set an execution policy,
-// a review request or interaction, a review policy, or anything else that records a decision.
-const ALLOWED_WRITES: ReadonlyArray<{ method: string; path: RegExp; fields: readonly string[] }> = [
+// a review request or interaction, a review policy, or anything else that records a decision; and an issue
+// status only to an open one (closing or cancelling can expire decisions waiting for a person).
+const ALLOWED_WRITES: ReadonlyArray<{
+  method: string;
+  path: RegExp;
+  fields: readonly string[];
+  statuses?: readonly string[];
+}> = [
   {
     method: "POST",
     path: /^\/api\/companies\/[^/]+\/issues$/,
     fields: ["title", "description", "assigneeAgentId", "priority", "status", "parentId"],
+    statuses: ["backlog", "todo"],
   },
   {
     method: "PATCH",
     path: /^\/api\/issues\/[^/]+$/,
     fields: ["title", "description", "status", "priority", "assigneeAgentId", "comment"],
+    statuses: ["backlog", "todo", "in_progress", "blocked"],
   },
   { method: "POST", path: /^\/api\/issues\/[^/]+\/comments$/, fields: ["body"] },
   { method: "POST", path: /^\/api\/agents\/[^/]+\/(pause|resume)$/, fields: [] },
@@ -44,7 +52,9 @@ function isAllowedWrite(req: Request): boolean {
   if (!allowed) return false;
   const body: unknown = req.body ?? {};
   if (typeof body !== "object" || Array.isArray(body)) return false;
-  return Object.keys(body).every((key) => allowed.fields.includes(key));
+  if (!Object.keys(body).every((key) => allowed.fields.includes(key))) return false;
+  const status = (body as Record<string, unknown>).status;
+  return status === undefined || (allowed.statuses ?? []).includes(String(status));
 }
 
 /** True for a board actor listed in PAPERCLIP_NON_DECIDING_USER_IDS (route handlers use it to refuse review sign-offs). */
