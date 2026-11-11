@@ -81,6 +81,20 @@ describe("nonDecidingUserGuard", () => {
     expect((await (request(createApp(agent)) as any)[method](path).send({})).status).toBe(200);
   });
 
+  it.each([
+    ["patch", "/api/issues/i1", { status: "todo", executionPolicy: { stages: [] } }],
+    ["patch", "/api/issues/i1", { reviewRequest: { reviewerAgentId: "a" } }],
+    ["patch", "/api/issues/i1", { reviewInteractionId: "x" }],
+    ["patch", "/api/issues/i1", { reviewPolicy: "anyone" }],
+    ["post", "/api/issues/i1/comments", { body: "hi", authorType: "user" }],
+    ["post", "/api/companies/c1/issues", { title: "t", reviewPolicy: "anyone" }],
+    ["post", "/api/agents/a1/resume", { force: true }],
+    ["put", "/api/agents/a1/instructions-bundle/file", { path: "AGENTS.md", content: "x", baseHash: "h", clearLegacyPromptTemplate: true }],
+  ])("refuses extra body fields from a listed user: %s %s %j", async (method, path, body) => {
+    const res = await (request(createApp(svc)) as any)[method](path).send(body);
+    expect(res.status).toBe(403);
+  });
+
   it("does nothing when no user is listed", async () => {
     const res = await request(createApp(svc, {} as NodeJS.ProcessEnv)).post("/api/approvals/a1/approve").send({});
     expect(res.status).toBe(200);

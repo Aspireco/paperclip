@@ -9,12 +9,22 @@ import type { Request, RequestHandler } from "express";
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-const ALLOWED_WRITES: ReadonlyArray<{ method: string; path: RegExp }> = [
-  { method: "POST", path: /^\/api\/companies\/[^/]+\/issues$/ },
-  { method: "PATCH", path: /^\/api\/issues\/[^/]+$/ },
-  { method: "POST", path: /^\/api\/issues\/[^/]+\/comments$/ },
-  { method: "POST", path: /^\/api\/agents\/[^/]+\/(pause|resume)$/ },
-  { method: "PUT", path: /^\/api\/agents\/[^/]+\/instructions-bundle\/file$/ },
+// Each allowed write also limits the body to plain fields, so a listed user cannot set an execution policy,
+// a review request or interaction, a review policy, or anything else that records a decision.
+const ALLOWED_WRITES: ReadonlyArray<{ method: string; path: RegExp; fields: readonly string[] }> = [
+  {
+    method: "POST",
+    path: /^\/api\/companies\/[^/]+\/issues$/,
+    fields: ["title", "description", "assigneeAgentId", "priority", "status", "parentId", "projectId"],
+  },
+  {
+    method: "PATCH",
+    path: /^\/api\/issues\/[^/]+$/,
+    fields: ["title", "description", "status", "priority", "assigneeAgentId", "comment"],
+  },
+  { method: "POST", path: /^\/api\/issues\/[^/]+\/comments$/, fields: ["body"] },
+  { method: "POST", path: /^\/api\/agents\/[^/]+\/(pause|resume)$/, fields: [] },
+  { method: "PUT", path: /^\/api\/agents\/[^/]+\/instructions-bundle\/file$/, fields: ["path", "content", "baseHash"] },
 ];
 
 export function nonDecidingUserIds(env: NodeJS.ProcessEnv = process.env): ReadonlySet<string> {
@@ -28,7 +38,17 @@ export function nonDecidingUserIds(env: NodeJS.ProcessEnv = process.env): Readon
 
 function isAllowedWrite(req: Request): boolean {
   const path = req.originalUrl.split("?")[0];
-  return ALLOWED_WRITES.some((allowed) => allowed.method === req.method && allowed.path.test(path));
+  const allowed = ALLOWED_WRITES.find((entry) => entry.method === req.method && entry.path.test(path));
+  if (!allowed) return false;
+  const body: unknown = req.body ?? {};
+  if (typeof body !== "object" || Array.isArray(body)) return false;
+  return Object.keys(body).every((key) => allowed.fields.includes(key));
+}
+
+/** True for a board actor listed in PAPERCLIP_NON_DECIDING_USER_IDS (route handlers use it to refuse review sign-offs). */
+export function isNonDecidingActor(req: Request, env: NodeJS.ProcessEnv = process.env): boolean {
+  const actor = req.actor;
+  return actor?.type === "board" && !!actor.userId && nonDecidingUserIds(env).has(actor.userId);
 }
 
 export function nonDecidingUserGuard(env: NodeJS.ProcessEnv = process.env): RequestHandler {

@@ -4102,4 +4102,65 @@ describe.sequential("issue comment reopen routes", () => {
       ),
     );
   });
+  describe("non-deciding service users (PAPERCLIP_NON_DECIDING_USER_IDS)", () => {
+    const svcActor = {
+      type: "board",
+      userId: "svc-admin",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    };
+
+    it("refuses a review sign-off comment from a listed user", async () => {
+      vi.stubEnv("PAPERCLIP_NON_DECIDING_USER_IDS", "svc-admin");
+      try {
+        mockIssueService.getById.mockResolvedValue(makeIssue("in_review"));
+        const res = await request(await installActor(createApp(), svcActor))
+          .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+          .send({ body: "## Review: APPROVED" });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe("decision_not_allowed");
+        expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it.each([
+      [{ status: "done" }],
+      [{ status: "cancelled" }],
+      [{ status: "todo" }],
+      [{ assigneeAgentId: "33333333-3333-4333-8333-333333333333" }],
+    ])("refuses moving or reassigning an issue in review: %j", async (patch) => {
+      vi.stubEnv("PAPERCLIP_NON_DECIDING_USER_IDS", "svc-admin");
+      try {
+        mockIssueService.getById.mockResolvedValue(makeIssue("in_review"));
+        const res = await request(await installActor(createApp(), svcActor))
+          .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+          .send(patch);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe("decision_not_allowed");
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("still lets a listed user close an issue that is not in review", async () => {
+      vi.stubEnv("PAPERCLIP_NON_DECIDING_USER_IDS", "svc-admin");
+      try {
+        const issue = makeIssue("todo");
+        mockIssueService.getById.mockResolvedValue(issue);
+        mockIssueService.update.mockImplementation(
+          async (_id: string, patch: Record<string, unknown>) => makeIssueUpdateReceipt(issue, patch),
+        );
+        const res = await request(await installActor(createApp(), svcActor))
+          .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+          .send({ status: "done" });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
 });
