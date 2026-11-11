@@ -15,7 +15,7 @@ const ALLOWED_WRITES: ReadonlyArray<{ method: string; path: RegExp; fields: read
   {
     method: "POST",
     path: /^\/api\/companies\/[^/]+\/issues$/,
-    fields: ["title", "description", "assigneeAgentId", "priority", "status", "parentId", "projectId"],
+    fields: ["title", "description", "assigneeAgentId", "priority", "status", "parentId"],
   },
   {
     method: "PATCH",
@@ -37,7 +37,9 @@ export function nonDecidingUserIds(env: NodeJS.ProcessEnv = process.env): Readon
 }
 
 function isAllowedWrite(req: Request): boolean {
-  const path = req.originalUrl.split("?")[0];
+  // Match on the pathname Express routes on, and refuse anything that could make the two differ.
+  if (/[#;%\\]/.test(req.originalUrl.split("?")[0])) return false;
+  const path = req.path;
   const allowed = ALLOWED_WRITES.find((entry) => entry.method === req.method && entry.path.test(path));
   if (!allowed) return false;
   const body: unknown = req.body ?? {};

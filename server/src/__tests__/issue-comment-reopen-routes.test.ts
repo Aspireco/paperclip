@@ -4146,7 +4146,21 @@ describe.sequential("issue comment reopen routes", () => {
       }
     });
 
-    it("still lets a listed user close an issue that is not in review", async () => {
+    it.each(["done", "cancelled", "in_review"])("never lets a listed user set %s on an open issue", async (status) => {
+      vi.stubEnv("PAPERCLIP_NON_DECIDING_USER_IDS", "svc-admin");
+      try {
+        mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+        const res = await request(await installActor(createApp(), svcActor))
+          .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+          .send({ status });
+        expect(res.status).toBe(403);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("still lets a listed user move an open issue along", async () => {
       vi.stubEnv("PAPERCLIP_NON_DECIDING_USER_IDS", "svc-admin");
       try {
         const issue = makeIssue("todo");
@@ -4156,7 +4170,7 @@ describe.sequential("issue comment reopen routes", () => {
         );
         const res = await request(await installActor(createApp(), svcActor))
           .patch("/api/issues/11111111-1111-4111-8111-111111111111")
-          .send({ status: "done" });
+          .send({ status: "in_progress" });
         expect(res.status).toBe(200);
       } finally {
         vi.unstubAllEnvs();

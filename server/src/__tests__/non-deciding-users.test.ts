@@ -46,6 +46,8 @@ const DECISIONS: Array<[string, string]> = [
   ["post", "/API/approvals/a1/approve"],
   ["post", "/api/Companies/c1/issues"],
   ["post", "/api/companies/c1/issues/extra"],
+  ["post", "/api/issues/i1;x/comments"],
+  ["post", "/api/issues/i1%2Fx/comments"],
 ];
 
 describe("nonDecidingUserIds", () => {
@@ -88,6 +90,7 @@ describe("nonDecidingUserGuard", () => {
     ["patch", "/api/issues/i1", { reviewPolicy: "anyone" }],
     ["post", "/api/issues/i1/comments", { body: "hi", authorType: "user" }],
     ["post", "/api/companies/c1/issues", { title: "t", reviewPolicy: "anyone" }],
+    ["post", "/api/companies/c1/issues", { title: "t", projectId: "p" }],
     ["post", "/api/agents/a1/resume", { force: true }],
     ["put", "/api/agents/a1/instructions-bundle/file", { path: "AGENTS.md", content: "x", baseHash: "h", clearLegacyPromptTemplate: true }],
   ])("refuses extra body fields from a listed user: %s %s %j", async (method, path, body) => {

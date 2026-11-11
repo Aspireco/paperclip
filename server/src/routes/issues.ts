@@ -12826,12 +12826,14 @@ export function issueRoutes(
         res.status(400).json({ error: "Attachment ids require a comment" });
         return;
       }
-      // Aspireco: a non-deciding service user never moves or reassigns an issue that is in review.
+      // Aspireco: a non-deciding service user never closes or cancels an issue (that can expire decisions
+      // waiting for John), never sends one to review, and never moves or reassigns an issue that is in review.
       if (
         isNonDecidingActor(req) &&
-        existing.status === "in_review" &&
-        ((updateFields.status !== undefined && updateFields.status !== existing.status) ||
-          req.body.assigneeAgentId !== undefined)
+        (["done", "cancelled", "in_review"].includes(String(updateFields.status)) ||
+          (existing.status === "in_review" &&
+            ((updateFields.status !== undefined && updateFields.status !== existing.status) ||
+              req.body.assigneeAgentId !== undefined)))
       ) {
         res.status(403).json({ error: "This user cannot decide or move a review.", code: "decision_not_allowed" });
         return;
