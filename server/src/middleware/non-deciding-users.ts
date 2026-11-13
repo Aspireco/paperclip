@@ -51,7 +51,7 @@ function isAllowedWrite(req: Request): boolean {
   const allowed = ALLOWED_WRITES.find((entry) => entry.method === req.method && entry.path.test(path));
   if (!allowed) return false;
   const body: unknown = req.body ?? {};
-  if (typeof body !== "object" || Array.isArray(body)) return false;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
   if (!Object.keys(body).every((key) => allowed.fields.includes(key))) return false;
   const status = (body as Record<string, unknown>).status;
   return status === undefined || (allowed.statuses ?? []).includes(String(status));
