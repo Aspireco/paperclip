@@ -153,6 +153,7 @@ import { getTelemetryClient } from "../telemetry.js";
 import { isUniqueViolation } from "../db-errors.js";
 import type { StorageService } from "../storage/types.js";
 import { validate, validateIssueMutationBody } from "../middleware/validate.js";
+import { isNonDecidingActor } from "../middleware/non-deciding-users.js";
 import * as serviceIndex from "../services/index.js";
 import {
   accessService,
@@ -12825,6 +12826,18 @@ export function issueRoutes(
         res.status(400).json({ error: "Attachment ids require a comment" });
         return;
       }
+      // Aspireco: a non-deciding service user never closes or cancels an issue (that can expire decisions
+      // waiting for John), never sends one to review, and never moves or reassigns an issue that is in review.
+      if (
+        isNonDecidingActor(req) &&
+        (["done", "cancelled", "in_review"].includes(String(updateFields.status)) ||
+          (existing.status === "in_review" &&
+            ((updateFields.status !== undefined && updateFields.status !== existing.status) ||
+              req.body.assigneeAgentId !== undefined)))
+      ) {
+        res.status(403).json({ error: "This user cannot decide or move a review.", code: "decision_not_allowed" });
+        return;
+      }
       const reviewPolicyChangeRequested =
         req.body.reviewPolicy !== undefined &&
         req.body.reviewPolicy !== existing.reviewPolicy;
@@ -17564,6 +17577,11 @@ export function issueRoutes(
       const currentExecutionPolicy = normalizeIssueExecutionPolicy(
         currentIssue.executionPolicy ?? null,
       );
+      // Aspireco: a non-deciding service user never posts something Paperclip reads as a review sign-off.
+      if (isNonDecidingActor(req) && isApprovalReviewComment(req.body.body)) {
+        res.status(403).json({ error: "This user cannot sign off a review.", code: "decision_not_allowed" });
+        return;
+      }
       const shouldAutoApproveReviewComment =
         currentIssue.status === "in_review" &&
         currentExecutionState?.status === "pending" &&
