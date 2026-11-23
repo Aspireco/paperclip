@@ -397,6 +397,9 @@ export function healthRoutes(
         commit,
         bootstrapStatus,
         bootstrapInviteActive,
+        // The sign-in page is anonymous and needs this one flag to show "Sign in with Aspire One";
+        // nothing else under `features` is exposed here.
+        features: { aspireOneSignIn: aspireOneConfig() !== null },
         ...(redactedDatabaseBackup ? { databaseBackup: redactedDatabaseBackup } : {}),
         ...(redactedWarnings ? { warnings: redactedWarnings } : {}),
         ...(devServer ? { devServer } : {}),
