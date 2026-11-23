@@ -16,7 +16,9 @@ describe("Aspire One sign-in", () => {
       issuer: "https://auth.example.test/application/o/paperclip/",
       clientId: "paperclip",
       clientSecret: "test-only",
+      redirectUri: "https://agents.aspireco.ca/api/auth/callback/aspire-one",
     });
+    expect(aspireOneConfig({ ...ENV, PAPERCLIP_OIDC_REDIRECT_URI: "http://x.test/cb" })).toBeNull();
   });
 
   it("never signs anyone up and never links by email", () => {
@@ -30,6 +32,7 @@ describe("Aspire One sign-in", () => {
     expect(provider?.disableImplicitSignUp).toBe(true);
     expect(provider?.requireIdTokenVerification).toBe(true);
     expect(provider?.pkce).toBe(true);
+    expect(provider?.redirectURI).toBe("https://agents.aspireco.ca/api/auth/callback/aspire-one");
     expect(provider?.discoveryUrl).toBe("https://auth.example.test/application/o/paperclip/.well-known/openid-configuration");
   });
 });

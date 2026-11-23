@@ -21,6 +21,12 @@ export interface AspireOneConfig {
   issuer: string;
   clientId: string;
   clientSecret: string;
+  /**
+   * Where Aspire One sends the browser back. Pinned, because better-auth would otherwise build it
+   * from PAPERCLIP_PUBLIC_URL (the Railway hostname), which Authentik does not allow and where the
+   * browser holds no sign-in state. Default: https://agents.aspireco.ca/api/auth/callback/aspire-one.
+   */
+  redirectUri: string;
 }
 
 export function aspireOneConfig(env: Record<string, string | undefined> = process.env): AspireOneConfig | null {
@@ -28,12 +34,15 @@ export function aspireOneConfig(env: Record<string, string | undefined> = proces
   const clientId = env.PAPERCLIP_OIDC_CLIENT_ID?.trim();
   const clientSecret = env.PAPERCLIP_OIDC_CLIENT_SECRET?.trim();
   if (!issuer || !clientId || !clientSecret) return null;
+  const redirectUri =
+    env.PAPERCLIP_OIDC_REDIRECT_URI?.trim() || "https://agents.aspireco.ca/api/auth/callback/aspire-one";
   try {
     if (new URL(issuer).protocol !== "https:") return null;
+    if (new URL(redirectUri).protocol !== "https:") return null;
   } catch {
     return null;
   }
-  return { issuer: issuer.endsWith("/") ? issuer : `${issuer}/`, clientId, clientSecret };
+  return { issuer: issuer.endsWith("/") ? issuer : `${issuer}/`, clientId, clientSecret, redirectUri };
 }
 
 export function aspireOnePlugin(config: AspireOneConfig) {
@@ -45,6 +54,7 @@ export function aspireOnePlugin(config: AspireOneConfig) {
         requireIdTokenVerification: true,
         clientId: config.clientId,
         clientSecret: config.clientSecret,
+        redirectURI: config.redirectUri,
         scopes: ["openid", "email", "profile"],
         pkce: true,
         disableSignUp: true,
