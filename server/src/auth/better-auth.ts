@@ -11,6 +11,7 @@ import {
   authVerifications,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
+import { ASPIRE_ONE_ACCOUNT_OPTIONS, aspireOneConfig, aspireOnePlugin } from "./aspire-one.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
 import {
   workspaceLoginHandoffPlugin,
@@ -257,6 +258,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     publicUrl,
   });
 
+  const aspireOne = aspireOneConfig();
   const authConfig = {
     baseURL: baseUrl,
     secret,
@@ -281,13 +283,17 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       override: process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED,
     }),
     advanced: buildBetterAuthAdvancedOptions({ disableSecureCookies }),
+    // Aspire One (auth.aspireco.ca) sign-in: explicit linking only, never sign-up (aspire-one.ts).
+    ...(aspireOne ? { account: ASPIRE_ONE_ACCOUNT_OPTIONS } : {}),
     // Registered only for a managed workspace instance: the plugin is what makes
     // `Open workspace` password-independent, and a control-plane instance that
     // was never handed a workspace key must not expose the exchange at all.
-    ...(resolveWorkspaceHandoffIdentity(config)
+    ...(resolveWorkspaceHandoffIdentity(config) || aspireOne
       ? {
           plugins: [
-            workspaceLoginHandoffPlugin({
+            ...(aspireOne ? [aspireOnePlugin(aspireOne)] : []),
+            ...(resolveWorkspaceHandoffIdentity(config)
+              ? [workspaceLoginHandoffPlugin({
               db,
               // Re-resolved per exchange so a hot restart cannot keep validating
               // against an origin the control plane has since republished.
@@ -299,7 +305,8 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
                   companyId: null,
                   origin: null,
                 },
-            }),
+            })]
+              : []),
           ],
         }
       : {}),

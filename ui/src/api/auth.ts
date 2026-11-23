@@ -175,6 +175,31 @@ export const authApi = {
     await authPost("/sign-in/email", input);
   },
 
+  /**
+   * Aspire One (auth.aspireco.ca): better-auth answers with the provider URL to go to. Sign-in
+   * works only for an account that connected Aspire One from its profile (no sign-up through it).
+   */
+  signInAspireOne: async (callbackURL: string): Promise<string | null> => {
+    const payload = (await authPost("/sign-in/social", { provider: "aspire-one", callbackURL })) as { url?: unknown } | null;
+    return typeof payload?.url === "string" ? payload.url : null;
+  },
+
+  linkAspireOne: async (callbackURL: string): Promise<string | null> => {
+    const payload = (await authPost("/link-social", { provider: "aspire-one", callbackURL })) as { url?: unknown } | null;
+    return typeof payload?.url === "string" ? payload.url : null;
+  },
+
+  unlinkAspireOne: async (): Promise<void> => {
+    await authPost("/unlink-account", { providerId: "aspire-one" });
+  },
+
+  listAccounts: async (): Promise<Array<{ providerId: string }>> => {
+    const res = await fetch("/api/auth/list-accounts", { credentials: "include", headers: { Accept: "application/json" } });
+    const payload = await res.json().catch(() => null);
+    if (!res.ok || !Array.isArray(payload)) return [];
+    return payload.filter((row): row is { providerId: string } => typeof row?.providerId === "string");
+  },
+
   signUpEmail: async (input: { name: string; email: string; password: string }) => {
     await authPost("/sign-up/email", input);
   },

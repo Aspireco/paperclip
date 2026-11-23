@@ -25,6 +25,7 @@ export function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [aspireOnePending, setAspireOnePending] = useState(false);
   const errorId = "auth-error";
 
   const nextPath = useMemo(
@@ -203,6 +204,37 @@ export function AuthPage() {
                   : "Create Account"}
             </Button>
           </form>
+
+          {mode === "sign_in" && healthQuery.data?.features?.aspireOneSignIn ? (
+            <div className="mt-4">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={aspireOnePending}
+                onClick={async () => {
+                  setError(null);
+                  setAspireOnePending(true);
+                  try {
+                    const url = await authApi.signInAspireOne(nextPath);
+                    if (url) {
+                      window.location.assign(url);
+                      return;
+                    }
+                    setError("Aspire One sign-in is unavailable right now.");
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Aspire One sign-in failed.");
+                  }
+                  setAspireOnePending(false);
+                }}
+              >
+                {aspireOnePending ? "Opening Aspire One…" : "Sign in with Aspire One"}
+              </Button>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Works once you have connected Aspire One from your profile.
+              </p>
+            </div>
+          ) : null}
 
           <div className="mt-5 text-sm text-muted-foreground">
             {mode === "sign_in" ? "Need an account?" : "Already have an account?"}{" "}

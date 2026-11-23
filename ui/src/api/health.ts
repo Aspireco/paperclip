@@ -38,6 +38,7 @@ export type HealthStatus = {
   bootstrapInviteActive?: boolean;
   features?: {
     companyDeletionEnabled?: boolean;
+    aspireOneSignIn?: boolean;
   };
   serverInfo?: ServerInfoSnapshot;
   devServer?: DevServerHealthStatus;

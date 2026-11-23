@@ -1,4 +1,5 @@
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
+import { aspireOneConfig } from "../auth/aspire-one.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
@@ -422,6 +423,8 @@ export function healthRoutes(
       bootstrapInviteActive,
       features: {
         companyDeletionEnabled: opts.companyDeletionEnabled,
+        // "Sign in with Aspire One" (auth.aspireco.ca) is on: the sign-in page shows the button.
+        aspireOneSignIn: aspireOneConfig() !== null,
       },
       serverInfo,
       startupRecovery,
