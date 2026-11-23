@@ -8,6 +8,7 @@ import express from "express";
 import request from "supertest";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
+import { HttpError } from "../errors.js";
 import { actorMiddleware } from "../middleware/auth.js";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -356,6 +357,11 @@ const support = await getEmbeddedPostgresTestSupport();
         .where(eq(agents.id, pausedAgentId));
       const heartbeat = heartbeatService(db);
 
+      // The comment route calls this right after saving the message.
+      expect(
+        await deliverConversationComments(db, issue, heartbeat.wakeup),
+      ).toBe("deferred");
+
       // Startup runs this; a rejection stops the server from starting.
       await expect(
         heartbeat.reconcileStrandedAssignedIssues(),
@@ -388,6 +394,57 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(
         wakes.map((wake) => (wake.payload as Record<string, unknown>).commentId),
       ).toContain(message.id);
+    });
+    it("defers a message when the agent is paused during the enqueue, and rethrows other errors", async () => {
+      const racedAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: racedAgentId,
+        companyId,
+        name: "Raced",
+        role: "engineer",
+        status: "idle",
+        adapterType: "process",
+      });
+      const issue = await issueService(db).create(companyId, {
+        title: "Conversation paused mid-delivery",
+        conversationAgentId: racedAgentId,
+        conversationUserId: randomUUID(),
+        assigneeAgentId: racedAgentId,
+        status: "in_review",
+        conversationState: "waiting",
+      });
+      await issueService(db).addComment(
+        issue.id,
+        "Hello",
+        { userId: "local-board" },
+        { clientRequestId: randomUUID() },
+      );
+      await expect(
+        deliverConversationComments(db, issue, async () => {
+          throw new HttpError(500, "boom");
+        }),
+      ).rejects.toThrow("boom");
+      await expect(
+        deliverConversationComments(db, issue, async () => {
+          throw new HttpError(409, "Agent is not invokable in its current state", {
+            reason: "paused",
+          });
+        }),
+      ).rejects.toThrow(/not invokable/);
+      expect(
+        await deliverConversationComments(db, issue, async () => {
+          await db
+            .update(agents)
+            .set({ status: "paused" })
+            .where(eq(agents.id, racedAgentId));
+          throw new HttpError(409, "Agent is not invokable in its current state", {
+            reason: "paused",
+          });
+        }),
+      ).toBe("deferred");
+      expect(
+        await undeliveredConversationComments(db, companyId, issue.id),
+      ).toHaveLength(1);
     });
     it("resets only this task, keeps history, and fences stale replies and retries", async () => {
       const issue = await create();

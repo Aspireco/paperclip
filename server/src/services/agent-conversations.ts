@@ -6,6 +6,7 @@ import {
 import type { NativeStatusDecision } from "./native-runtime/status-arbiter.js";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import {
+  agents,
   agentTaskSessions,
   agentWakeupRequests,
   heartbeatRuns,
@@ -17,6 +18,8 @@ import {
 } from "@paperclipai/db";
 
 import { sanitizeQuarantinedCommentForHigherTrust } from "./source-trust.js";
+import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
+import { HttpError } from "../errors.js";
 
 export type ConversationIdentity = {
   conversationAgentId?: string | null;
@@ -530,8 +533,20 @@ export async function deliverConversationComments(
       contextSnapshot: Record<string, unknown>;
     },
   ) => Promise<unknown>,
-) {
+): Promise<"delivered" | "deferred" | undefined> {
   if (!issue.conversationAgentId) return;
+  // Backported from upstream paperclipai/paperclip (71f0c0c99, #17983): a
+  // paused agent or an invalid reporting chain leaves the durable comment
+  // outbox untouched, so the message is delivered once the agent can run.
+  // Before this, the enqueue threw 409 here: the comment route answered an
+  // error for a saved message, and stranded recovery (startup included)
+  // aborted its whole pass.
+  const canDeliver = async (connection: Db) => {
+    const [agent] = await connection.select().from(agents).where(and(
+      eq(agents.id, issue.conversationAgentId!), eq(agents.companyId, issue.companyId),
+    ));
+    return evaluateAgentInvokabilityFromDb(connection, agent);
+  };
   for (;;) {
     const delivered = await db.transaction(async (tx) => {
       // Contenders release their connection while waiting so concurrent sends
@@ -539,34 +554,47 @@ export async function deliverConversationComments(
       const locks = await tx.execute(
         sql`select pg_try_advisory_xact_lock(hashtextextended(${"conversation-delivery:" + issue.id}, 0)) as acquired`,
       );
-      if (!locks[0]?.acquired) return false;
+      if (!locks[0]?.acquired) return "retry" as const;
       for (const comment of await undeliveredConversationComments(
         tx as unknown as Db,
         issue.companyId,
         issue.id,
       )) {
+        if (!(await canDeliver(tx as unknown as Db)).invokable) return "deferred" as const;
         await resumeConversationForReset(db, comment);
-        await enqueue(issue.conversationAgentId!, {
-          source: "on_demand",
-          triggerDetail: "manual",
-          reason: "issue_commented",
-          idempotencyKey: `conversation-comment:${comment.id}`,
-          requestedByActorType: "user",
-          requestedByActorId: comment.authorUserId,
-          payload: { issueId: issue.id, commentId: comment.id },
-          contextSnapshot: {
-            issueId: issue.id,
-            taskKey: issue.id,
-            commentId: comment.id,
-            wakeCommentId: comment.id,
-            wakeCommentIds: [comment.id],
-            source: "issue.comment",
-          },
-        });
+        try {
+          await enqueue(issue.conversationAgentId!, {
+            source: "on_demand",
+            triggerDetail: "manual",
+            reason: "issue_commented",
+            idempotencyKey: `conversation-comment:${comment.id}`,
+            requestedByActorType: "user",
+            requestedByActorId: comment.authorUserId,
+            payload: { issueId: issue.id, commentId: comment.id },
+            contextSnapshot: {
+              issueId: issue.id,
+              taskKey: issue.id,
+              commentId: comment.id,
+              wakeCommentId: comment.id,
+              wakeCommentIds: [comment.id],
+              source: "issue.comment",
+            },
+          });
+        } catch (error) {
+          // Admission stays authoritative if eligibility changed after our
+          // read. Defer only the matching invokability conflict; other
+          // failures stay visible and are never reported as delivered.
+          const current = error instanceof HttpError && error.status === 409
+            ? await canDeliver(tx as unknown as Db) : null;
+          const reason = error instanceof HttpError && error.details && typeof error.details === "object"
+            ? (error.details as Record<string, unknown>).reason : null;
+          if (current && !current.invokable && reason === current.reason) return "deferred" as const;
+          throw error;
+        }
       }
-      return true;
+      return "delivered" as const;
     });
-    if (delivered) return;
+    if (delivered !== "retry") return delivered;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }

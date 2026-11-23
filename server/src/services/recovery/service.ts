@@ -70,7 +70,7 @@ import {
   nativeRunnerOwnershipNotHeldCondition,
 } from "../native-runtime/native-runner-ownership.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
-import { HttpError, forbidden, notFound } from "../../errors.js";
+import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import {
   isPidAlive,
@@ -4404,23 +4404,9 @@ export function recoveryService(
           }
         }
         if (!(await instanceSettingsService(db).getExperimental()).enableAgentChat) { result.skipped += 1; continue; }
-        // A paused (or otherwise non-invokable) chat agent keeps its messages
-        // undelivered until it can run again; this pass delivers them then.
-        // Enqueueing now throws 409, and one throw here used to abort the
-        // whole pass for every company and stop the server from starting.
-        if (!(await isAgentInvokable(await getAgent(issue.conversationAgentId)))) {
-          result.skipped += 1;
-          continue;
-        }
-        try {
-          await deliverConversationComments(db, issue, deps.enqueueWakeup);
-        } catch (err) {
-          // The agent can be paused between the check above and the enqueue.
-          if (!(err instanceof HttpError && err.status === 409)) throw err;
-          logger.warn(
-            { err, issueId: issue.id, agentId: issue.conversationAgentId },
-            "stranded recovery left a chat message undelivered: agent not invokable",
-          );
+        // A paused chat agent keeps its messages in the outbox; a later pass
+        // delivers them after the agent resumes.
+        if (await deliverConversationComments(db, issue, deps.enqueueWakeup) === "deferred") {
           result.skipped += 1;
           continue;
         }
