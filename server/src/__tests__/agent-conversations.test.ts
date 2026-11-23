@@ -326,6 +326,69 @@ const support = await getEmbeddedPostgresTestSupport();
         ),
       ).rejects.toThrow(/different content/);
     });
+    it("keeps a paused agent's chat message for later instead of failing recovery", async () => {
+      const pausedAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: pausedAgentId,
+        companyId,
+        name: "Producer",
+        role: "engineer",
+        status: "idle",
+        adapterType: "process",
+      });
+      const issue = await issueService(db).create(companyId, {
+        title: "Conversation with a paused agent",
+        conversationAgentId: pausedAgentId,
+        conversationUserId: randomUUID(),
+        assigneeAgentId: pausedAgentId,
+        status: "in_review",
+        conversationState: "waiting",
+      });
+      const message = await issueService(db).addComment(
+        issue.id,
+        "Make a plan",
+        { userId: "local-board" },
+        { clientRequestId: randomUUID() },
+      );
+      await db
+        .update(agents)
+        .set({ status: "paused" })
+        .where(eq(agents.id, pausedAgentId));
+      const heartbeat = heartbeatService(db);
+
+      // Startup runs this; a rejection stops the server from starting.
+      await expect(
+        heartbeat.reconcileStrandedAssignedIssues(),
+      ).resolves.toBeDefined();
+      expect(
+        (await undeliveredConversationComments(db, companyId, issue.id)).map(
+          (comment) => comment.id,
+        ),
+      ).toEqual([message.id]);
+      expect(
+        await db
+          .select()
+          .from(agentWakeupRequests)
+          .where(eq(agentWakeupRequests.agentId, pausedAgentId)),
+      ).toHaveLength(0);
+
+      // Resuming the agent delivers the message on the next pass.
+      await db
+        .update(agents)
+        .set({ status: "idle" })
+        .where(eq(agents.id, pausedAgentId));
+      await heartbeat.reconcileStrandedAssignedIssues();
+      expect(
+        await undeliveredConversationComments(db, companyId, issue.id),
+      ).toHaveLength(0);
+      const wakes = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, pausedAgentId));
+      expect(
+        wakes.map((wake) => (wake.payload as Record<string, unknown>).commentId),
+      ).toContain(message.id);
+    });
     it("resets only this task, keeps history, and fences stale replies and retries", async () => {
       const issue = await create();
       const other = await create();
