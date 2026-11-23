@@ -11,6 +11,7 @@ import { InboxAgentPolicyControl } from "@/components/InboxAgentPolicyControl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { AspireOneConnectCard } from "@/components/AspireOneConnectCard";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -271,6 +272,7 @@ export function ProfileSettings() {
         </form>
 
         <InboxAgentPolicyControl companyId={selectedCompanyId} />
+        <AspireOneConnectCard />
       </section>
     </div>
   );
