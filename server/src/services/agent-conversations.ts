@@ -599,6 +599,44 @@ export async function deliverConversationComments(
   }
 }
 
+/**
+ * Deliver every chat message held for an agent while it could not run.
+ *
+ * Messages to a paused agent stay in the outbox ("deferred" above). Stranded
+ * recovery delivers them later, but it only visits todo / in_progress /
+ * in_review tasks, so a chat left blocked (or done) kept its message until the
+ * next one was sent. The resume route calls this so every held message goes
+ * out when the agent can run again, whatever the chat's status. That is the
+ * same delivery the comment route does at send time. One chat's failure does
+ * not stop the others; the caller decides how to report it.
+ */
+export async function deliverHeldConversationsForAgent(
+  db: Db,
+  agent: { id: string; companyId: string },
+  enqueue: Parameters<typeof deliverConversationComments>[2],
+) {
+  const chats = await db
+    .select({ id: issues.id, companyId: issues.companyId, conversationAgentId: issues.conversationAgentId })
+    .from(issues)
+    .where(and(
+      eq(issues.companyId, agent.companyId),
+      eq(issues.conversationAgentId, agent.id),
+      isNull(issues.hiddenAt),
+    ));
+  const result = { delivered: 0, deferred: 0, failed: [] as Array<{ issueId: string; error: unknown }> };
+  for (const chat of chats) {
+    if ((await undeliveredConversationComments(db, chat.companyId, chat.id)).length === 0) continue;
+    try {
+      const outcome = await deliverConversationComments(db, chat, enqueue);
+      if (outcome === "deferred") result.deferred += 1;
+      else result.delivered += 1;
+    } catch (error) {
+      result.failed.push({ issueId: chat.id, error });
+    }
+  }
+  return result;
+}
+
 /** Conversation turns do not need execution-task completion evidence or a continuation. */
 export function conversationNativeDecision(input: {
   conversation: boolean;
