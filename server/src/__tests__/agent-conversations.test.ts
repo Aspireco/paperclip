@@ -465,9 +465,22 @@ const support = await getEmbeddedPostgresTestSupport();
         .select()
         .from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.agentId, blockedChatAgentId));
+      const wake = wakes.find(
+        (row) => (row.payload as Record<string, unknown>).commentId === message.id,
+      );
+      expect(wake).toBeDefined();
+      // A "skipped" wake would also empty the outbox while no run ever sees
+      // the message; the resume must hand it to a real run.
+      expect(wake!.status).not.toBe("skipped");
+      expect(wake!.runId).toBeTruthy();
+      const [run] = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, wake!.runId!));
+      expect(run?.agentId).toBe(blockedChatAgentId);
       expect(
-        wakes.map((wake) => (wake.payload as Record<string, unknown>).commentId),
-      ).toContain(message.id);
+        (run?.contextSnapshot as Record<string, unknown>)?.commentId,
+      ).toBe(message.id);
     });
     it("keeps recovering other chats when one chat cannot be delivered", async () => {
       const pausedCompanyId = randomUUID();
