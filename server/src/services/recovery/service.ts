@@ -4406,7 +4406,23 @@ export function recoveryService(
         if (!(await instanceSettingsService(db).getExperimental()).enableAgentChat) { result.skipped += 1; continue; }
         // A paused chat agent keeps its messages in the outbox; a later pass
         // delivers them after the agent resumes.
-        if (await deliverConversationComments(db, issue, deps.enqueueWakeup) === "deferred") {
+        let delivery: Awaited<ReturnType<typeof deliverConversationComments>>;
+        try {
+          delivery = await deliverConversationComments(db, issue, deps.enqueueWakeup);
+        } catch (err) {
+          // Deliberate difference from upstream, which rethrows here. This pass
+          // serves every company and startup awaits it, so one chat that cannot
+          // be delivered (an inactive company, a budget block, any other
+          // admission error) must not stop recovery or the server. The message
+          // stays in the outbox and the next pass tries again.
+          logger.error(
+            { err, issueId: issue.id, companyId: issue.companyId, agentId: issue.conversationAgentId },
+            "stranded recovery could not deliver a chat message; skipping this chat",
+          );
+          result.skipped += 1;
+          continue;
+        }
+        if (delivery === "deferred") {
           result.skipped += 1;
           continue;
         }

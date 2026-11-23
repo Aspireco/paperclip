@@ -395,6 +395,74 @@ const support = await getEmbeddedPostgresTestSupport();
         wakes.map((wake) => (wake.payload as Record<string, unknown>).commentId),
       ).toContain(message.id);
     });
+    it("keeps recovering other chats when one chat cannot be delivered", async () => {
+      const pausedCompanyId = randomUUID();
+      const pausedCompanyAgentId = randomUUID();
+      const liveAgentId = randomUUID();
+      await db.insert(companies).values({
+        id: pausedCompanyId,
+        name: "Paused company",
+        issuePrefix: "PCO",
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values([
+        {
+          id: pausedCompanyAgentId,
+          companyId: pausedCompanyId,
+          name: "Idle in a paused company",
+          role: "engineer",
+          status: "idle",
+          adapterType: "process",
+        },
+        {
+          id: liveAgentId,
+          companyId,
+          name: "Live",
+          role: "engineer",
+          status: "idle",
+          adapterType: "process",
+        },
+      ]);
+      const chatIn = async (company: string, agent: string) => {
+        const issue = await issueService(db).create(company, {
+          title: "Conversation",
+          conversationAgentId: agent,
+          conversationUserId: randomUUID(),
+          assigneeAgentId: agent,
+          status: "in_review",
+          conversationState: "waiting",
+        });
+        const message = await issueService(db).addComment(
+          issue.id,
+          "Hello",
+          { userId: "local-board" },
+          { clientRequestId: randomUUID() },
+        );
+        return { issue, message };
+      };
+      const blocked = await chatIn(pausedCompanyId, pausedCompanyAgentId);
+      const live = await chatIn(companyId, liveAgentId);
+      // The agent can run, but the wakeup refuses a user request in a company
+      // that is not active ("Company is not active", 409).
+      await db
+        .update(companies)
+        .set({ status: "paused" })
+        .where(eq(companies.id, pausedCompanyId));
+
+      await expect(
+        heartbeatService(db).reconcileStrandedAssignedIssues(),
+      ).resolves.toBeDefined();
+      expect(
+        await undeliveredConversationComments(
+          db,
+          pausedCompanyId,
+          blocked.issue.id,
+        ),
+      ).toHaveLength(1);
+      expect(
+        await undeliveredConversationComments(db, companyId, live.issue.id),
+      ).toHaveLength(0);
+    });
     it("defers a message when the agent is paused during the enqueue, and rethrows other errors", async () => {
       const racedAgentId = randomUUID();
       await db.insert(agents).values({
