@@ -363,6 +363,7 @@ describe("GET /health", () => {
       commit: testServerInfo.git.fullSha,
       bootstrapStatus: "ready",
       bootstrapInviteActive: false,
+      features: { aspireOneSignIn: false },
       databaseBackup: {
         enabled: true,
         status: "warning",
@@ -421,6 +422,7 @@ describe("GET /health", () => {
       commit: testServerInfo.git.fullSha,
       bootstrapStatus: "ready",
       bootstrapInviteActive: false,
+      features: { aspireOneSignIn: false },
     });
     expect(res.body.serverInfo).toBeUndefined();
   });
@@ -460,6 +462,7 @@ describe("GET /health", () => {
       commit: testServerInfo.git.fullSha,
       bootstrapStatus: "ready",
       bootstrapInviteActive: false,
+      features: { aspireOneSignIn: false },
     });
     expect(res.body.serverInfo).toBeUndefined();
   });
@@ -544,6 +547,7 @@ describe("GET /health", () => {
       status: "ok",
       bootstrapStatus: "bootstrap_pending",
       bootstrapInviteActive: false,
+      features: { aspireOneSignIn: false },
     });
   });
 
@@ -581,6 +585,7 @@ describe("GET /health", () => {
       status: "ok",
       bootstrapStatus: "ready",
       bootstrapInviteActive: false,
+      features: { aspireOneSignIn: false },
     });
   });
 });
