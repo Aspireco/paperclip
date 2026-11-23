@@ -8,6 +8,7 @@ import express from "express";
 import request from "supertest";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
+import { HttpError } from "../errors.js";
 import { actorMiddleware } from "../middleware/auth.js";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -325,6 +326,193 @@ const support = await getEmbeddedPostgresTestSupport();
           { clientRequestId },
         ),
       ).rejects.toThrow(/different content/);
+    });
+    it("keeps a paused agent's chat message for later instead of failing recovery", async () => {
+      const pausedAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: pausedAgentId,
+        companyId,
+        name: "Producer",
+        role: "engineer",
+        status: "idle",
+        adapterType: "process",
+      });
+      const issue = await issueService(db).create(companyId, {
+        title: "Conversation with a paused agent",
+        conversationAgentId: pausedAgentId,
+        conversationUserId: randomUUID(),
+        assigneeAgentId: pausedAgentId,
+        status: "in_review",
+        conversationState: "waiting",
+      });
+      const message = await issueService(db).addComment(
+        issue.id,
+        "Make a plan",
+        { userId: "local-board" },
+        { clientRequestId: randomUUID() },
+      );
+      await db
+        .update(agents)
+        .set({ status: "paused" })
+        .where(eq(agents.id, pausedAgentId));
+      const heartbeat = heartbeatService(db);
+
+      // The comment route calls this right after saving the message.
+      expect(
+        await deliverConversationComments(db, issue, heartbeat.wakeup),
+      ).toBe("deferred");
+
+      // Startup runs this; a rejection stops the server from starting.
+      await expect(
+        heartbeat.reconcileStrandedAssignedIssues(),
+      ).resolves.toBeDefined();
+      expect(
+        (await undeliveredConversationComments(db, companyId, issue.id)).map(
+          (comment) => comment.id,
+        ),
+      ).toEqual([message.id]);
+      expect(
+        await db
+          .select()
+          .from(agentWakeupRequests)
+          .where(eq(agentWakeupRequests.agentId, pausedAgentId)),
+      ).toHaveLength(0);
+
+      // Resuming the agent delivers the message on the next pass.
+      await db
+        .update(agents)
+        .set({ status: "idle" })
+        .where(eq(agents.id, pausedAgentId));
+      await heartbeat.reconcileStrandedAssignedIssues();
+      expect(
+        await undeliveredConversationComments(db, companyId, issue.id),
+      ).toHaveLength(0);
+      const wakes = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, pausedAgentId));
+      expect(
+        wakes.map((wake) => (wake.payload as Record<string, unknown>).commentId),
+      ).toContain(message.id);
+    });
+    it("keeps recovering other chats when one chat cannot be delivered", async () => {
+      const pausedCompanyId = randomUUID();
+      const pausedCompanyAgentId = randomUUID();
+      const liveAgentId = randomUUID();
+      await db.insert(companies).values({
+        id: pausedCompanyId,
+        name: "Paused company",
+        issuePrefix: "PCO",
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values([
+        {
+          id: pausedCompanyAgentId,
+          companyId: pausedCompanyId,
+          name: "Idle in a paused company",
+          role: "engineer",
+          status: "idle",
+          adapterType: "process",
+        },
+        {
+          id: liveAgentId,
+          companyId,
+          name: "Live",
+          role: "engineer",
+          status: "idle",
+          adapterType: "process",
+        },
+      ]);
+      const chatIn = async (company: string, agent: string) => {
+        const issue = await issueService(db).create(company, {
+          title: "Conversation",
+          conversationAgentId: agent,
+          conversationUserId: randomUUID(),
+          assigneeAgentId: agent,
+          status: "in_review",
+          conversationState: "waiting",
+        });
+        const message = await issueService(db).addComment(
+          issue.id,
+          "Hello",
+          { userId: "local-board" },
+          { clientRequestId: randomUUID() },
+        );
+        return { issue, message };
+      };
+      const blocked = await chatIn(pausedCompanyId, pausedCompanyAgentId);
+      const live = await chatIn(companyId, liveAgentId);
+      // The agent can run, but the wakeup refuses a user request in a company
+      // that is not active ("Company is not active", 409).
+      await db
+        .update(companies)
+        .set({ status: "paused" })
+        .where(eq(companies.id, pausedCompanyId));
+
+      await expect(
+        heartbeatService(db).reconcileStrandedAssignedIssues(),
+      ).resolves.toBeDefined();
+      expect(
+        await undeliveredConversationComments(
+          db,
+          pausedCompanyId,
+          blocked.issue.id,
+        ),
+      ).toHaveLength(1);
+      expect(
+        await undeliveredConversationComments(db, companyId, live.issue.id),
+      ).toHaveLength(0);
+    });
+    it("defers a message when the agent is paused during the enqueue, and rethrows other errors", async () => {
+      const racedAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: racedAgentId,
+        companyId,
+        name: "Raced",
+        role: "engineer",
+        status: "idle",
+        adapterType: "process",
+      });
+      const issue = await issueService(db).create(companyId, {
+        title: "Conversation paused mid-delivery",
+        conversationAgentId: racedAgentId,
+        conversationUserId: randomUUID(),
+        assigneeAgentId: racedAgentId,
+        status: "in_review",
+        conversationState: "waiting",
+      });
+      await issueService(db).addComment(
+        issue.id,
+        "Hello",
+        { userId: "local-board" },
+        { clientRequestId: randomUUID() },
+      );
+      await expect(
+        deliverConversationComments(db, issue, async () => {
+          throw new HttpError(500, "boom");
+        }),
+      ).rejects.toThrow("boom");
+      await expect(
+        deliverConversationComments(db, issue, async () => {
+          throw new HttpError(409, "Agent is not invokable in its current state", {
+            reason: "paused",
+          });
+        }),
+      ).rejects.toThrow(/not invokable/);
+      expect(
+        await deliverConversationComments(db, issue, async () => {
+          await db
+            .update(agents)
+            .set({ status: "paused" })
+            .where(eq(agents.id, racedAgentId));
+          throw new HttpError(409, "Agent is not invokable in its current state", {
+            reason: "paused",
+          });
+        }),
+      ).toBe("deferred");
+      expect(
+        await undeliveredConversationComments(db, companyId, issue.id),
+      ).toHaveLength(1);
     });
     it("resets only this task, keeps history, and fences stale replies and retries", async () => {
       const issue = await create();
