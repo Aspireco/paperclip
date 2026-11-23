@@ -7,6 +7,7 @@ import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compa
 import express from "express";
 import request from "supertest";
 import { issueRoutes } from "../routes/issues.js";
+import { agentRoutes } from "../routes/agents.js";
 import { errorHandler } from "../middleware/index.js";
 import { HttpError } from "../errors.js";
 import { actorMiddleware } from "../middleware/auth.js";
@@ -391,6 +392,79 @@ const support = await getEmbeddedPostgresTestSupport();
         .select()
         .from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.agentId, pausedAgentId));
+      expect(
+        wakes.map((wake) => (wake.payload as Record<string, unknown>).commentId),
+      ).toContain(message.id);
+    });
+    it("delivers a held message on resume even when its chat is blocked", async () => {
+      const blockedChatAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: blockedChatAgentId,
+        companyId,
+        name: "Desk",
+        role: "engineer",
+        status: "idle",
+        adapterType: "process",
+      });
+      const issue = await issueService(db).create(companyId, {
+        title: "Conversation left blocked by a failed run",
+        conversationAgentId: blockedChatAgentId,
+        conversationUserId: randomUUID(),
+        assigneeAgentId: blockedChatAgentId,
+        status: "in_review",
+        conversationState: "waiting",
+      });
+      await db
+        .update(agents)
+        .set({ status: "paused" })
+        .where(eq(agents.id, blockedChatAgentId));
+      const message = await issueService(db).addComment(
+        issue.id,
+        "Are you there?",
+        { userId: "local-board" },
+        { clientRequestId: randomUUID() },
+      );
+      await db
+        .update(issues)
+        .set({ status: "blocked" })
+        .where(eq(issues.id, issue.id));
+      const heartbeat = heartbeatService(db);
+      expect(
+        await deliverConversationComments(db, issue, heartbeat.wakeup),
+      ).toBe("deferred");
+
+      // Recovery only visits todo / in_progress / in_review tasks, so a
+      // blocked chat's held message is not picked up there.
+      await db
+        .update(agents)
+        .set({ status: "idle" })
+        .where(eq(agents.id, blockedChatAgentId));
+      await heartbeat.reconcileStrandedAssignedIssues();
+      expect(
+        await undeliveredConversationComments(db, companyId, issue.id),
+      ).toHaveLength(1);
+      await db
+        .update(agents)
+        .set({ status: "paused" })
+        .where(eq(agents.id, blockedChatAgentId));
+
+      // Resuming through the route delivers it.
+      const app = express();
+      app.use(express.json());
+      app.use(actorMiddleware(db, { deploymentMode: "local_trusted" }));
+      app.use("/api", agentRoutes(db, { deploymentMode: "local_trusted" }));
+      app.use(errorHandler);
+      const resumed = await request(app)
+        .post(`/api/agents/${blockedChatAgentId}/resume`)
+        .send({});
+      expect(resumed.status).toBe(200);
+      expect(
+        await undeliveredConversationComments(db, companyId, issue.id),
+      ).toHaveLength(0);
+      const wakes = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, blockedChatAgentId));
       expect(
         wakes.map((wake) => (wake.payload as Record<string, unknown>).commentId),
       ).toContain(message.id);

@@ -245,6 +245,7 @@ import { resolveCoreTrustPreset } from "../services/trust-preset-resolver.js";
 import { readObject } from "../lib/objects.js";
 import { listInvalidOrgChainDescendantIds } from "../services/agent-invokability.js";
 import { logger } from "../middleware/logger.js";
+import { deliverHeldConversationsForAgent } from "../services/agent-conversations.js";
 import {
   AGENT_PROFILE_CHANGE_CONSENT_FIELDS,
   agentInstructionsChangeTargetKey,
@@ -5664,6 +5665,23 @@ export function agentRoutes(
       entityType: "agent",
       entityId: agent.id,
     });
+
+    // Send the chat messages held while the agent was paused, whatever the
+    // chat's status. A delivery problem never fails the resume itself: the
+    // messages stay in the outbox for the next pass or message.
+    try {
+      if ((await instanceSettings.getExperimental()).enableAgentChat) {
+        const held = await deliverHeldConversationsForAgent(db, agent, heartbeat.wakeup);
+        for (const failure of held.failed) {
+          logger.error(
+            { err: failure.error, issueId: failure.issueId, agentId: agent.id, companyId: agent.companyId },
+            "resume could not deliver a held chat message",
+          );
+        }
+      }
+    } catch (err) {
+      logger.error({ err, agentId: agent.id }, "resume could not look up held chat messages");
+    }
 
     res.json(redactAgentRowForResponse(agent));
   });
